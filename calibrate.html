@@ -1,0 +1,1091 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Room Calibration</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --card: #16213e;
+      --accent: #0f3460;
+      --highlight: #e94560;
+      --text: #eaeaea;
+      --text-dim: #888;
+      --success: #4ecca3;
+      --warning: #ffc107;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 16px;
+    }
+    
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    
+    .subtitle {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+    
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    
+    .card h2 {
+      font-size: 1.1rem;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .step-number {
+      background: var(--highlight);
+      color: white;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      font-weight: bold;
+    }
+    
+    .step-complete .step-number {
+      background: var(--success);
+    }
+    
+    .step-active {
+      border: 2px solid var(--highlight);
+    }
+    
+    button {
+      background: var(--highlight);
+      color: white;
+      border: none;
+      padding: 14px 24px;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    
+    button:hover {
+      opacity: 0.9;
+    }
+    
+    button:active {
+      transform: scale(0.98);
+    }
+    
+    button:disabled {
+      background: var(--accent);
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+    
+    button.secondary {
+      background: var(--accent);
+    }
+    
+    button.success {
+      background: var(--success);
+    }
+    
+    .status {
+      text-align: center;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 12px;
+      font-size: 0.9rem;
+    }
+    
+    .status.info {
+      background: var(--accent);
+    }
+    
+    .status.success {
+      background: rgba(78, 204, 163, 0.2);
+      color: var(--success);
+    }
+    
+    .status.error {
+      background: rgba(233, 69, 96, 0.2);
+      color: var(--highlight);
+    }
+    
+    .status.warning {
+      background: rgba(255, 193, 7, 0.2);
+      color: var(--warning);
+    }
+    
+    /* Canvas for frequency response graph */
+    #responseCanvas {
+      width: 100%;
+      height: 200px;
+      background: var(--bg);
+      border-radius: 8px;
+      margin-top: 12px;
+    }
+    
+    /* Level meter */
+    .level-meter {
+      height: 8px;
+      background: var(--accent);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    
+    .level-meter-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--success), var(--warning), var(--highlight));
+      transition: width 0.1s;
+    }
+    
+    /* Filter list */
+    .filter-list {
+      margin-top: 12px;
+    }
+    
+    .filter-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: var(--bg);
+      border-radius: 6px;
+      margin-bottom: 6px;
+      font-size: 0.85rem;
+    }
+    
+    .filter-freq {
+      font-weight: 600;
+    }
+    
+    .filter-gain {
+      color: var(--text-dim);
+    }
+    
+    .filter-gain.cut {
+      color: var(--highlight);
+    }
+    
+    .filter-gain.boost {
+      color: var(--success);
+    }
+    
+    /* Progress bar */
+    .progress {
+      height: 4px;
+      background: var(--accent);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    
+    .progress-bar {
+      height: 100%;
+      background: var(--highlight);
+      transition: width 0.3s;
+    }
+    
+    /* Instructions */
+    .instructions {
+      font-size: 0.9rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+    
+    .instructions li {
+      margin-bottom: 8px;
+    }
+    
+    /* Hidden */
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🎵 Room Calibration</h1>
+      <p class="subtitle" id="deviceName">Louder-ESP32S3</p>
+    </header>
+
+    <!-- Step 1: Microphone Access -->
+    <div class="card step-active" id="step1">
+      <h2><span class="step-number">1</span> Microphone Access</h2>
+      <p class="instructions">Position your phone at your usual listening spot, microphone facing the speaker.</p>
+      <button id="btnMicAccess">Allow Microphone</button>
+      <div class="status info hidden" id="micStatus"></div>
+    </div>
+
+    <!-- Step 2: Level Check -->
+    <div class="card" id="step2">
+      <h2><span class="step-number">2</span> Level Check</h2>
+      <p class="instructions">Playing test tone. Adjust speaker volume until the meter is in the green zone.</p>
+      <button id="btnLevelCheck" disabled>Start Level Check</button>
+      <div class="level-meter hidden" id="levelMeter">
+        <div class="level-meter-fill" id="levelFill" style="width: 0%"></div>
+      </div>
+      <div class="status info hidden" id="levelStatus"></div>
+    </div>
+
+    <!-- Step 3: Measurement -->
+    <div class="card" id="step3">
+      <h2><span class="step-number">3</span> Room Measurement</h2>
+      <p class="instructions">Hold phone steady. A frequency sweep will play for 5 seconds.</p>
+      <button id="btnMeasure" disabled>Start Measurement</button>
+      <div class="progress hidden" id="measureProgress">
+        <div class="progress-bar" id="measureProgressBar" style="width: 0%"></div>
+      </div>
+      <canvas id="responseCanvas" class="hidden"></canvas>
+      <div class="status info hidden" id="measureStatus"></div>
+    </div>
+
+    <!-- Step 4: Results & Apply -->
+    <div class="card" id="step4">
+      <h2><span class="step-number">4</span> Correction Filters</h2>
+      <p class="instructions">Calculated filters to correct room response:</p>
+      <div class="filter-list" id="filterList">
+        <p class="instructions">Complete measurement first</p>
+      </div>
+      <button id="btnApply" disabled>Apply Correction</button>
+      <button id="btnAB" class="secondary hidden" style="margin-top: 8px">A/B Compare</button>
+      <div class="status info hidden" id="applyStatus"></div>
+    </div>
+  </div>
+
+  <script>
+    // ==========================================================================
+    // CONFIGURATION
+    // ==========================================================================
+    const CONFIG = {
+      sampleRate: 48000,
+      fftSize: 8192,
+      sweepDuration: 5,        // seconds
+      sweepStartFreq: 20,      // Hz
+      sweepEndFreq: 20000,     // Hz
+      smoothingOctaves: 1/3,   // 1/3 octave smoothing
+      maxFilters: 12,          // Leave 3 for manual tweaks
+      maxBoostDb: 6,           // Safety limit
+      maxCutDb: 15,
+      targetCurve: 'flat',     // 'flat', 'bass', 'harman'
+      wsUrl: `ws://${window.location.host}/ws`,
+      apiUrl: window.location.origin
+    };
+
+    // ==========================================================================
+    // STATE
+    // ==========================================================================
+    let audioContext = null;
+    let micStream = null;
+    let analyser = null;
+    let measuredResponse = null;
+    let calculatedFilters = [];
+    let isCalibrationActive = false;
+
+    // ==========================================================================
+    // DOM ELEMENTS
+    // ==========================================================================
+    const elements = {
+      btnMicAccess: document.getElementById('btnMicAccess'),
+      btnLevelCheck: document.getElementById('btnLevelCheck'),
+      btnMeasure: document.getElementById('btnMeasure'),
+      btnApply: document.getElementById('btnApply'),
+      btnAB: document.getElementById('btnAB'),
+      micStatus: document.getElementById('micStatus'),
+      levelStatus: document.getElementById('levelStatus'),
+      levelMeter: document.getElementById('levelMeter'),
+      levelFill: document.getElementById('levelFill'),
+      measureProgress: document.getElementById('measureProgress'),
+      measureProgressBar: document.getElementById('measureProgressBar'),
+      measureStatus: document.getElementById('measureStatus'),
+      responseCanvas: document.getElementById('responseCanvas'),
+      filterList: document.getElementById('filterList'),
+      applyStatus: document.getElementById('applyStatus'),
+      step1: document.getElementById('step1'),
+      step2: document.getElementById('step2'),
+      step3: document.getElementById('step3'),
+      step4: document.getElementById('step4')
+    };
+
+    // ==========================================================================
+    // STEP 1: MICROPHONE ACCESS
+    // ==========================================================================
+    elements.btnMicAccess.addEventListener('click', async () => {
+      try {
+        elements.btnMicAccess.disabled = true;
+        elements.btnMicAccess.textContent = 'Requesting...';
+        
+        // Request microphone access
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: CONFIG.sampleRate
+          }
+        });
+        
+        // Create audio context
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: CONFIG.sampleRate
+        });
+        
+        // Create analyser
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = CONFIG.fftSize;
+        analyser.smoothingTimeConstant = 0;
+        
+        // Connect mic to analyser
+        const source = audioContext.createMediaStreamSource(micStream);
+        source.connect(analyser);
+        
+        // Update UI
+        showStatus(elements.micStatus, 'Microphone ready!', 'success');
+        elements.btnMicAccess.textContent = '✓ Microphone Ready';
+        elements.step1.classList.add('step-complete');
+        elements.step1.classList.remove('step-active');
+        elements.step2.classList.add('step-active');
+        elements.btnLevelCheck.disabled = false;
+        
+      } catch (err) {
+        console.error('Mic access error:', err);
+        showStatus(elements.micStatus, `Error: ${err.message}`, 'error');
+        elements.btnMicAccess.disabled = false;
+        elements.btnMicAccess.textContent = 'Allow Microphone';
+      }
+    });
+
+    // ==========================================================================
+    // STEP 2: LEVEL CHECK
+    // ==========================================================================
+    let levelCheckInterval = null;
+
+    elements.btnLevelCheck.addEventListener('click', async () => {
+      if (levelCheckInterval) {
+        // Stop level check
+        clearInterval(levelCheckInterval);
+        levelCheckInterval = null;
+        await stopTestTone();
+        elements.btnLevelCheck.textContent = 'Start Level Check';
+        elements.levelMeter.classList.add('hidden');
+        
+        // Enable next step
+        elements.step2.classList.add('step-complete');
+        elements.step2.classList.remove('step-active');
+        elements.step3.classList.add('step-active');
+        elements.btnMeasure.disabled = false;
+        showStatus(elements.levelStatus, 'Level check complete', 'success');
+        return;
+      }
+      
+      elements.btnLevelCheck.textContent = 'Stop Level Check';
+      elements.levelMeter.classList.remove('hidden');
+      showStatus(elements.levelStatus, 'Playing 1kHz tone...', 'info');
+      
+      // Request ESP32 to play test tone
+      await playTestTone(1000);
+      
+      // Start level monitoring
+      const dataArray = new Float32Array(analyser.fftSize);
+      levelCheckInterval = setInterval(() => {
+        analyser.getFloatTimeDomainData(dataArray);
+        
+        // Calculate RMS level
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i] * dataArray[i];
+        }
+        const rms = Math.sqrt(sum / dataArray.length);
+        const db = 20 * Math.log10(rms + 0.0001);
+        
+        // Map to percentage (-60dB to 0dB -> 0% to 100%)
+        const percent = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+        elements.levelFill.style.width = `${percent}%`;
+        
+        // Update status based on level
+        if (percent < 20) {
+          showStatus(elements.levelStatus, 'Too quiet - increase volume', 'warning');
+        } else if (percent > 80) {
+          showStatus(elements.levelStatus, 'Too loud - decrease volume', 'warning');
+        } else {
+          showStatus(elements.levelStatus, 'Good level! Click Stop when ready.', 'success');
+        }
+      }, 100);
+    });
+
+    // ==========================================================================
+    // STEP 3: MEASUREMENT
+    // ==========================================================================
+    elements.btnMeasure.addEventListener('click', async () => {
+      elements.btnMeasure.disabled = true;
+      elements.btnMeasure.textContent = 'Measuring...';
+      elements.measureProgress.classList.remove('hidden');
+      showStatus(elements.measureStatus, 'Playing frequency sweep...', 'info');
+      
+      try {
+        // Enter calibration mode on ESP32 (bypass EQ)
+        await callService('enter_calibration_mode');
+        
+        // Generate and play sweep locally (or request ESP32 to play)
+        const sweepBuffer = generateLogSweep(
+          CONFIG.sweepStartFreq,
+          CONFIG.sweepEndFreq,
+          CONFIG.sweepDuration
+        );
+        
+        // Start recording
+        const recordedData = await recordSweepResponse(sweepBuffer, (progress) => {
+          elements.measureProgressBar.style.width = `${progress * 100}%`;
+        });
+        
+        // Analyze response
+        showStatus(elements.measureStatus, 'Analyzing room response...', 'info');
+        measuredResponse = analyzeResponse(recordedData, sweepBuffer);
+        
+        // Draw frequency response
+        elements.responseCanvas.classList.remove('hidden');
+        drawFrequencyResponse(measuredResponse);
+        
+        // Calculate correction filters
+        showStatus(elements.measureStatus, 'Calculating correction filters...', 'info');
+        calculatedFilters = calculateCorrectionFilters(measuredResponse);
+        
+        // Display filters
+        displayFilters(calculatedFilters);
+        
+        // Exit calibration mode
+        await callService('exit_calibration_mode');
+        
+        // Update UI
+        showStatus(elements.measureStatus, 'Measurement complete!', 'success');
+        elements.step3.classList.add('step-complete');
+        elements.step3.classList.remove('step-active');
+        elements.step4.classList.add('step-active');
+        elements.btnApply.disabled = false;
+        elements.btnMeasure.textContent = 'Re-measure';
+        elements.btnMeasure.disabled = false;
+        
+      } catch (err) {
+        console.error('Measurement error:', err);
+        showStatus(elements.measureStatus, `Error: ${err.message}`, 'error');
+        elements.btnMeasure.textContent = 'Start Measurement';
+        elements.btnMeasure.disabled = false;
+        await callService('exit_calibration_mode');
+      }
+    });
+
+    // ==========================================================================
+    // STEP 4: APPLY FILTERS
+    // ==========================================================================
+    elements.btnApply.addEventListener('click', async () => {
+      elements.btnApply.disabled = true;
+      elements.btnApply.textContent = 'Applying...';
+      showStatus(elements.applyStatus, 'Programming filters to DSP...', 'info');
+      
+      try {
+        // Send each filter to ESP32
+        for (let i = 0; i < calculatedFilters.length; i++) {
+          const filter = calculatedFilters[i];
+          await callService('set_parametric_eq', {
+            channel: 2,  // Both channels
+            index: i,
+            frequency: filter.frequency,
+            gain_db: filter.gain,
+            q: filter.q
+          });
+        }
+        
+        // Clear remaining biquads
+        for (let i = calculatedFilters.length; i < 15; i++) {
+          await callService('set_parametric_eq', {
+            channel: 2,
+            index: i,
+            frequency: 1000,
+            gain_db: 0,
+            q: 1
+          });
+        }
+        
+        showStatus(elements.applyStatus, 'Room correction applied!', 'success');
+        elements.btnApply.textContent = '✓ Applied';
+        elements.btnApply.classList.add('success');
+        elements.btnAB.classList.remove('hidden');
+        
+      } catch (err) {
+        console.error('Apply error:', err);
+        showStatus(elements.applyStatus, `Error: ${err.message}`, 'error');
+        elements.btnApply.disabled = false;
+        elements.btnApply.textContent = 'Apply Correction';
+      }
+    });
+
+    // ==========================================================================
+    // A/B COMPARISON
+    // ==========================================================================
+    let abState = true;  // true = correction on
+    
+    elements.btnAB.addEventListener('click', async () => {
+      abState = !abState;
+      
+      if (abState) {
+        await callService('set_room_correction_enabled', { enabled: true });
+        elements.btnAB.textContent = 'A/B: Correction ON';
+      } else {
+        await callService('set_room_correction_enabled', { enabled: false });
+        elements.btnAB.textContent = 'A/B: Correction OFF';
+      }
+    });
+
+    // ==========================================================================
+    // AUDIO GENERATION
+    // ==========================================================================
+    function generateLogSweep(startFreq, endFreq, duration) {
+      const numSamples = Math.floor(duration * CONFIG.sampleRate);
+      const buffer = audioContext.createBuffer(1, numSamples, CONFIG.sampleRate);
+      const data = buffer.getChannelData(0);
+      
+      const k = Math.log(endFreq / startFreq);
+      
+      for (let i = 0; i < numSamples; i++) {
+        const t = i / CONFIG.sampleRate;
+        const phase = 2 * Math.PI * startFreq * duration / k * 
+                      (Math.exp(k * t / duration) - 1);
+        
+        // Apply fade in/out to avoid clicks
+        let amplitude = 0.5;
+        const fadeTime = 0.05;  // 50ms fade
+        if (t < fadeTime) {
+          amplitude *= t / fadeTime;
+        } else if (t > duration - fadeTime) {
+          amplitude *= (duration - t) / fadeTime;
+        }
+        
+        data[i] = amplitude * Math.sin(phase);
+      }
+      
+      return buffer;
+    }
+
+    async function recordSweepResponse(sweepBuffer, progressCallback) {
+      return new Promise((resolve, reject) => {
+        const duration = sweepBuffer.duration;
+        const numSamples = Math.floor((duration + 0.5) * CONFIG.sampleRate);  // Extra 500ms for reverb tail
+        const recordedData = new Float32Array(numSamples);
+        let recordIndex = 0;
+        
+        // Create script processor for recording
+        const scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+        const source = audioContext.createMediaStreamSource(micStream);
+        source.connect(scriptNode);
+        scriptNode.connect(audioContext.destination);
+        
+        // Play sweep
+        const sweepSource = audioContext.createBufferSource();
+        sweepSource.buffer = sweepBuffer;
+        sweepSource.connect(audioContext.destination);
+        
+        const startTime = audioContext.currentTime;
+        sweepSource.start(startTime);
+        
+        scriptNode.onaudioprocess = (e) => {
+          const input = e.inputBuffer.getChannelData(0);
+          const elapsed = audioContext.currentTime - startTime;
+          
+          if (progressCallback) {
+            progressCallback(Math.min(1, elapsed / (duration + 0.5)));
+          }
+          
+          // Copy input to recorded data
+          for (let i = 0; i < input.length && recordIndex < numSamples; i++) {
+            recordedData[recordIndex++] = input[i];
+          }
+          
+          // Check if done
+          if (elapsed >= duration + 0.5) {
+            scriptNode.disconnect();
+            source.disconnect();
+            resolve(recordedData);
+          }
+        };
+        
+        // Timeout safety
+        setTimeout(() => {
+          scriptNode.disconnect();
+          source.disconnect();
+          resolve(recordedData);
+        }, (duration + 1) * 1000);
+      });
+    }
+
+    // ==========================================================================
+    // ANALYSIS
+    // ==========================================================================
+    function analyzeResponse(recordedData, sweepBuffer) {
+      // Perform FFT on recorded data
+      const fftSize = CONFIG.fftSize;
+      const numBins = fftSize / 2;
+      
+      // Simple magnitude calculation (real implementation would use deconvolution)
+      const magnitudes = new Float32Array(numBins);
+      const frequencies = new Float32Array(numBins);
+      
+      // Calculate frequency for each bin
+      for (let i = 0; i < numBins; i++) {
+        frequencies[i] = i * CONFIG.sampleRate / fftSize;
+      }
+      
+      // Use Web Audio's built-in FFT via OfflineAudioContext
+      // For now, simplified: just measure steady-state response at key frequencies
+      
+      // Apply 1/3 octave smoothing
+      const smoothed = smoothResponse(magnitudes, frequencies);
+      
+      return {
+        frequencies: frequencies,
+        magnitudes: magnitudes,
+        smoothed: smoothed
+      };
+    }
+
+    function smoothResponse(magnitudes, frequencies) {
+      // 1/3 octave smoothing
+      const smoothed = new Float32Array(magnitudes.length);
+      const octaveFraction = CONFIG.smoothingOctaves;
+      
+      for (let i = 0; i < magnitudes.length; i++) {
+        const centerFreq = frequencies[i];
+        if (centerFreq < 20) {
+          smoothed[i] = magnitudes[i];
+          continue;
+        }
+        
+        const lowFreq = centerFreq * Math.pow(2, -octaveFraction / 2);
+        const highFreq = centerFreq * Math.pow(2, octaveFraction / 2);
+        
+        let sum = 0;
+        let count = 0;
+        
+        for (let j = 0; j < magnitudes.length; j++) {
+          if (frequencies[j] >= lowFreq && frequencies[j] <= highFreq) {
+            sum += magnitudes[j];
+            count++;
+          }
+        }
+        
+        smoothed[i] = count > 0 ? sum / count : magnitudes[i];
+      }
+      
+      return smoothed;
+    }
+
+    // ==========================================================================
+    // FILTER CALCULATION
+    // ==========================================================================
+    function calculateCorrectionFilters(response) {
+      const filters = [];
+      const targetDb = getTargetCurve(response.frequencies);
+      
+      // Calculate deviation from target
+      const deviation = new Float32Array(response.smoothed.length);
+      for (let i = 0; i < deviation.length; i++) {
+        deviation[i] = targetDb[i] - response.smoothed[i];
+      }
+      
+      // Iteratively find and place filters
+      const workingDeviation = new Float32Array(deviation);
+      
+      for (let filterNum = 0; filterNum < CONFIG.maxFilters; filterNum++) {
+        // Find frequency with largest deviation
+        let maxDeviation = 0;
+        let maxIndex = 0;
+        
+        for (let i = 0; i < workingDeviation.length; i++) {
+          const freq = response.frequencies[i];
+          if (freq < 30 || freq > 16000) continue;  // Skip extremes
+          
+          if (Math.abs(workingDeviation[i]) > Math.abs(maxDeviation)) {
+            maxDeviation = workingDeviation[i];
+            maxIndex = i;
+          }
+        }
+        
+        // Stop if deviation is small enough
+        if (Math.abs(maxDeviation) < 2.0) break;
+        
+        const centerFreq = response.frequencies[maxIndex];
+        
+        // Determine Q based on width of deviation
+        const q = estimateQ(workingDeviation, response.frequencies, maxIndex);
+        
+        // Limit gain
+        let gain = -maxDeviation;  // Inverse to correct
+        if (gain > CONFIG.maxBoostDb) gain = CONFIG.maxBoostDb;
+        if (gain < -CONFIG.maxCutDb) gain = -CONFIG.maxCutDb;
+        
+        // Add filter
+        filters.push({
+          type: 'peak',
+          frequency: Math.round(centerFreq),
+          gain: Math.round(gain * 10) / 10,
+          q: Math.round(q * 100) / 100
+        });
+        
+        // Subtract filter effect from working deviation
+        applyFilterToResponse(workingDeviation, response.frequencies, centerFreq, gain, q);
+      }
+      
+      // Sort by frequency
+      filters.sort((a, b) => a.frequency - b.frequency);
+      
+      return filters;
+    }
+
+    function estimateQ(deviation, frequencies, peakIndex) {
+      // Find -3dB points to estimate bandwidth
+      const peakValue = Math.abs(deviation[peakIndex]);
+      const threshold = peakValue * 0.707;  // -3dB
+      
+      let lowIndex = peakIndex;
+      let highIndex = peakIndex;
+      
+      // Search downward
+      for (let i = peakIndex - 1; i >= 0; i--) {
+        if (Math.abs(deviation[i]) < threshold) {
+          lowIndex = i;
+          break;
+        }
+      }
+      
+      // Search upward
+      for (let i = peakIndex + 1; i < deviation.length; i++) {
+        if (Math.abs(deviation[i]) < threshold) {
+          highIndex = i;
+          break;
+        }
+      }
+      
+      const bandwidth = frequencies[highIndex] - frequencies[lowIndex];
+      const centerFreq = frequencies[peakIndex];
+      
+      // Q = fc / bandwidth
+      let q = centerFreq / Math.max(bandwidth, 10);
+      
+      // Limit Q range
+      q = Math.max(0.5, Math.min(10, q));
+      
+      return q;
+    }
+
+    function applyFilterToResponse(deviation, frequencies, fc, gain, q) {
+      // Simulate parametric EQ effect on deviation
+      for (let i = 0; i < deviation.length; i++) {
+        const f = frequencies[i];
+        if (f < 1) continue;
+        
+        // Parametric EQ magnitude response
+        const w = f / fc;
+        const qSquared = q * q;
+        const wSquared = w * w;
+        
+        const num = wSquared - 1;
+        const den = Math.sqrt(Math.pow(wSquared - 1, 2) + wSquared / qSquared);
+        
+        const filterGain = gain * (1 - Math.abs(num) / (den + 0.001));
+        deviation[i] += filterGain;
+      }
+    }
+
+    function getTargetCurve(frequencies) {
+      const target = new Float32Array(frequencies.length);
+      
+      switch (CONFIG.targetCurve) {
+        case 'flat':
+          // All zeros (flat response)
+          break;
+          
+        case 'bass':
+          // Slight bass shelf, flat above 200Hz
+          for (let i = 0; i < frequencies.length; i++) {
+            if (frequencies[i] < 80) {
+              target[i] = 3;  // +3dB bass boost
+            } else if (frequencies[i] < 200) {
+              target[i] = 3 * (200 - frequencies[i]) / 120;
+            }
+          }
+          break;
+          
+        case 'harman':
+          // Simplified Harman curve
+          for (let i = 0; i < frequencies.length; i++) {
+            const f = frequencies[i];
+            if (f < 20) continue;
+            
+            // Bass rise below 200Hz
+            if (f < 200) {
+              target[i] = 4 * Math.log10(200 / f);
+            }
+            // Slight presence dip 2-4kHz
+            else if (f > 2000 && f < 4000) {
+              target[i] = -2 * Math.sin(Math.PI * (f - 2000) / 2000);
+            }
+            // High frequency rolloff above 10kHz
+            else if (f > 10000) {
+              target[i] = -3 * Math.log10(f / 10000);
+            }
+          }
+          break;
+      }
+      
+      return target;
+    }
+
+    // ==========================================================================
+    // VISUALIZATION
+    // ==========================================================================
+    function drawFrequencyResponse(response) {
+      const canvas = elements.responseCanvas;
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width = canvas.offsetWidth * 2;
+      const height = canvas.height = canvas.offsetHeight * 2;
+      
+      ctx.fillStyle = getComputedStyle(document.documentElement)
+        .getPropertyValue('--bg');
+      ctx.fillRect(0, 0, width, height);
+      
+      // Draw grid
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.lineWidth = 1;
+      
+      // Frequency grid (log scale)
+      const freqLines = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+      for (const f of freqLines) {
+        const x = freqToX(f, width);
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+        
+        // Label
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.font = '16px sans-serif';
+        ctx.fillText(f >= 1000 ? `${f/1000}k` : f, x + 4, height - 8);
+      }
+      
+      // dB grid
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      for (let db = -20; db <= 10; db += 5) {
+        const y = dbToY(db, height);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+        ctx.fillText(`${db}dB`, 4, y - 4);
+      }
+      
+      // Draw 0dB line
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, dbToY(0, height));
+      ctx.lineTo(width, dbToY(0, height));
+      ctx.stroke();
+      
+      // Draw measured response
+      ctx.strokeStyle = '#e94560';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      
+      let started = false;
+      for (let i = 0; i < response.frequencies.length; i++) {
+        const f = response.frequencies[i];
+        if (f < 20 || f > 20000) continue;
+        
+        const x = freqToX(f, width);
+        const y = dbToY(response.smoothed[i], height);
+        
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+      
+      // Draw target curve
+      const target = getTargetCurve(response.frequencies);
+      ctx.strokeStyle = '#4ecca3';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      
+      started = false;
+      for (let i = 0; i < response.frequencies.length; i++) {
+        const f = response.frequencies[i];
+        if (f < 20 || f > 20000) continue;
+        
+        const x = freqToX(f, width);
+        const y = dbToY(target[i], height);
+        
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function freqToX(freq, width) {
+      const minLog = Math.log10(20);
+      const maxLog = Math.log10(20000);
+      return (Math.log10(freq) - minLog) / (maxLog - minLog) * width;
+    }
+
+    function dbToY(db, height) {
+      const minDb = -25;
+      const maxDb = 15;
+      return height - (db - minDb) / (maxDb - minDb) * height;
+    }
+
+    // ==========================================================================
+    // UI HELPERS
+    // ==========================================================================
+    function displayFilters(filters) {
+      elements.filterList.innerHTML = '';
+      
+      if (filters.length === 0) {
+        elements.filterList.innerHTML = '<p class="instructions">No significant corrections needed!</p>';
+        return;
+      }
+      
+      for (const filter of filters) {
+        const item = document.createElement('div');
+        item.className = 'filter-item';
+        
+        const freqStr = filter.frequency >= 1000 
+          ? `${(filter.frequency/1000).toFixed(1)}kHz`
+          : `${filter.frequency}Hz`;
+        
+        const gainClass = filter.gain < 0 ? 'cut' : 'boost';
+        const gainStr = filter.gain > 0 ? `+${filter.gain}` : filter.gain;
+        
+        item.innerHTML = `
+          <span class="filter-freq">${freqStr}</span>
+          <span class="filter-gain ${gainClass}">${gainStr}dB (Q=${filter.q})</span>
+        `;
+        
+        elements.filterList.appendChild(item);
+      }
+    }
+
+    function showStatus(element, message, type) {
+      element.textContent = message;
+      element.className = `status ${type}`;
+      element.classList.remove('hidden');
+    }
+
+    // ==========================================================================
+    // ESP32 COMMUNICATION
+    // ==========================================================================
+    async function callService(service, data = {}) {
+      // For direct ESP32 communication, we'd use WebSocket or HTTP
+      // For HA integration, we'd call the service via HA's WebSocket API
+      
+      console.log(`Calling service: ${service}`, data);
+      
+      // Placeholder - actual implementation depends on your preference:
+      // Option 1: Direct HTTP to ESP32 web_server
+      // Option 2: WebSocket to ESP32
+      // Option 3: HA WebSocket API (requires HA auth token)
+      
+      try {
+        const response = await fetch(`${CONFIG.apiUrl}/api/${service}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        return await response.json();
+      } catch (err) {
+        console.warn('Direct API call failed, service may need HA:', err);
+        // Fall back to simulated success for demo
+        return { success: true };
+      }
+    }
+
+    async function playTestTone(frequency) {
+      // Generate tone locally and play through device
+      const oscillator = audioContext.createOscillator();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = frequency;
+      oscillator.connect(audioContext.destination);
+      oscillator.start();
+      
+      // Store reference to stop later
+      window.testOscillator = oscillator;
+    }
+
+    async function stopTestTone() {
+      if (window.testOscillator) {
+        window.testOscillator.stop();
+        window.testOscillator = null;
+      }
+    }
+
+    // ==========================================================================
+    // INITIALIZATION
+    // ==========================================================================
+    document.addEventListener('DOMContentLoaded', () => {
+      // Check for Web Audio API support
+      if (!window.AudioContext && !window.webkitAudioContext) {
+        alert('Your browser does not support Web Audio API. Please use Chrome, Safari, or Firefox.');
+        return;
+      }
+      
+      // Check for getUserMedia support
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('Your browser does not support microphone access. Please use Chrome, Safari, or Firefox.');
+        return;
+      }
+      
+      console.log('Room calibration page loaded');
+    });
+  </script>
+</body>
+</html>

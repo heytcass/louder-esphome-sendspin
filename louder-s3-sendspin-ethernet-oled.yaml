@@ -1,0 +1,522 @@
+# Louder-ESP32S3 with Sendspin + W5500 Ethernet + OLED Display
+# Based on mrtoy-me's config: https://github.com/mrtoy-me/esphome-tas5805m
+# 
+# Hardware:
+#   - Sonocotta Louder-ESP32S3 (TAS5805M DAC)
+#   - W5500 SPI Ethernet module
+#   - 128x64 SSD1306/SH1106 OLED display (SPI)
+#   - 65W USB-C PD power supply
+#
+# For Sendspin beta testing - December 2025
+
+substitutions:
+  name: "louder-s3-kitchen"  # Change per zone
+  friendly_name: "Kitchen Speaker"  # Change per zone
+
+# Include room correction services (biquad programming via HA services)
+packages:
+  room_correction: !include room_correction_services.yaml
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.12.0
+  platformio_options:
+    board_build.flash_mode: dio
+  on_boot:
+    priority: 220.0
+    then:
+      - media_player.play_media:
+          id: external_media_player
+          media_url: file://startup_sync_sound
+
+esp32:
+  variant: ESP32S3
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      # Move instructions/data to PSRAM for better performance
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    number: INFO
+    sensor: WARN
+    spi: WARN
+
+api:
+  # encryption:
+  #   key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    # password: !secret esphome_ota_password
+
+http_request:
+
+# =============================================================================
+# NETWORKING - W5500 Ethernet (replaces WiFi for reliability)
+# =============================================================================
+# Pinout for Louder-ESP32S3:
+#   CS=10, MOSI=11, CLK=12, MISO=13, INT=6, RST=5
+
+ethernet:
+  type: W5500
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+  cs_pin: GPIO10
+  interrupt_pin: GPIO6
+  reset_pin: GPIO5
+
+# =============================================================================
+# SPI BUS - Shared by Ethernet and OLED
+# =============================================================================
+spi:
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+  interface: spi3
+
+# =============================================================================
+# I2C BUS - TAS5805M DAC
+# =============================================================================
+i2c:
+  id: i2c_bus
+  sda: GPIO8
+  scl: GPIO9
+  frequency: 400kHz
+  scan: true
+  timeout: 100us
+
+# =============================================================================
+# EXTERNAL COMPONENTS - Sendspin + TAS5805M
+# =============================================================================
+external_components:
+  - source: github://mrtoy-me/esphome-tas5805m@beta
+    components: [tas5805m]
+    refresh: 0s
+
+  - source: github://pr#12253
+    components: [mixer]
+    refresh: 0s
+
+  - source: github://pr#12254
+    components: [resampler]
+    refresh: 0s
+
+  - source: github://pr#12256
+    components: [audio]
+    refresh: 0s
+
+  - source: github://pr#12258
+    components: [media_player]
+    refresh: 0s
+
+  - source: github://pr#12284
+    components: [mdns, sendspin]
+    refresh: 0s
+
+  - source: github://pr#12429
+    components: [file, http_request, media_source, speaker_source]
+    refresh: 0s
+
+# =============================================================================
+# GLOBALS
+# =============================================================================
+globals:
+  - id: current_volume
+    type: float
+  - id: announcement_triggered
+    type: bool
+    initial_value: 'false'
+
+# =============================================================================
+# TAS5805M DAC CONFIGURATION
+# =============================================================================
+audio_dac:
+  - platform: tas5805m
+    id: tas5805m_dac
+    enable_pin: GPIO17
+    analog_gain: -15.5db    # Conservative start - increase if too quiet
+    dac_mode: BTL           # Stereo mode
+    mixer_mode: STEREO
+    volume_max: -1dB        # Headroom protection
+    volume_min: -50db
+    update_interval: 1s
+
+# =============================================================================
+# I2S AUDIO OUTPUT
+# =============================================================================
+i2s_audio:
+  i2s_lrclk_pin: GPIO15
+  i2s_bclk_pin: GPIO14
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker_id
+    sample_rate: 48000
+    i2s_dout_pin: GPIO16
+    bits_per_sample: 32bit
+    dac_type: external
+    channel: stereo
+    timeout: never
+    buffer_duration: 100ms
+    audio_dac: tas5805m_dac
+
+  - platform: mixer
+    id: mixer_speaker_id
+    output_speaker: i2s_speaker_id
+    num_channels: 2
+    task_stack_in_psram: true
+    source_speakers:
+      - id: announcement_mixer_input
+        timeout: never
+      - id: media_mixer_input
+        timeout: never
+
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixer_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixer_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+# =============================================================================
+# SENDSPIN CONFIGURATION
+# =============================================================================
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+  kalman_process_error: 0.01
+
+media_source:
+  - platform: sendspin
+    id: sendspin_source
+  - platform: http_request
+    id: http_source
+    buffer_size: 500000
+  - platform: file
+    id: file_source
+    files:
+      id: startup_sync_sound
+      file: https://github.com/mrtoy-me/esphome-tas5805m/raw/main/components/tas5805m/tas5805m_boot_louder.flac
+
+media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
+
+  - platform: speaker_source
+    id: external_media_player
+    name: Media Player
+    announcement_speaker: announcement_resampling_speaker
+    media_speaker: media_resampling_speaker
+    announcement_pipeline:
+      format: FLAC
+      num_channels: 1
+      sample_rate: 48000
+    media_pipeline:
+      format: FLAC
+      num_channels: 2
+      sample_rate: 48000
+    volume_increment: 0.05
+    sources:
+      - file_source
+      - http_source
+      - sendspin_source
+    on_announcement:
+      - if:
+          condition:
+            - lambda: return (!id(announcement_triggered));
+          then:
+            - lambda: |-
+                id(announcement_triggered) = true;
+                id(current_volume) = id(external_media_player).volume;
+            - mixer_speaker.apply_ducking:
+                id: media_mixer_input
+                decibel_reduction: 40
+                duration: 0.0s
+            - wait_until:
+                media_player.is_announcing: external_media_player
+            - delay: 0.75s
+            - media_player.volume_set:
+                id: external_media_player
+                volume: !lambda "return id(announce_volume).state / 100.0;"
+            - wait_until:
+                - not:
+                    media_player.is_announcing: external_media_player
+            - mixer_speaker.apply_ducking:
+                id: media_mixer_input
+                decibel_reduction: 0
+                duration: 1.0s
+            - media_player.volume_set:
+                id: external_media_player
+                volume: !lambda "return id(current_volume);"
+            - lambda: id(announcement_triggered) = false;
+
+    on_state:
+      if:
+        condition:
+          and:
+            - lambda: return (!id(announcement_triggered));
+            - not:
+                media_player.is_announcing: external_media_player
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixer_input
+              decibel_reduction: 0
+              duration: 1.0s
+
+# =============================================================================
+# SENDSPIN METADATA TEXT SENSORS
+# =============================================================================
+text_sensor:
+  - platform: sendspin
+    id: track_title
+    type: title
+    name: Track Title
+    on_value:
+      - component.update: oled_display
+
+  - platform: sendspin
+    id: track_artist
+    type: artist
+    name: Artist
+    on_value:
+      - component.update: oled_display
+
+  - platform: sendspin
+    id: album_title
+    type: album
+    name: Album
+    on_value:
+      - component.update: oled_display
+
+  - platform: sendspin
+    id: album_year
+    type: year
+
+  - platform: sendspin
+    id: track_number
+    type: track
+
+# =============================================================================
+# OLED DISPLAY - 128x64 SSD1306 (SPI)
+# =============================================================================
+# Pinout for Louder-ESP32S3:
+#   CS=47, DC=38, RST=48, MOSI/CLK shared with Ethernet
+
+font:
+  # Main title font
+  - file: "gfonts://Roboto@500"
+    id: font_title
+    size: 16
+    glyphs: " !\"%()+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\xB0\xA3\u20AC\xA5\xA2\xA4'"
+
+  # Artist/album font
+  - file: "gfonts://Roboto"
+    id: font_body
+    size: 12
+    glyphs: " !\"%()+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\xB0\xA3\u20AC\xA5\xA2\xA4'"
+
+  # Small info font
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 10
+    glyphs: " !\"%()+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\xB0\xA3\u20AC\xA5\xA2\xA4'"
+
+  # Material Design Icons
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: font_icons
+    size: 20
+    glyphs:
+      - "\U000F040A"  # play
+      - "\U000F03E4"  # pause
+      - "\U000F04DB"  # stop
+      - "\U000F057E"  # volume-high
+      - "\U000F0580"  # volume-mute
+      - "\U000F075F"  # music-note
+
+display:
+  - platform: ssd1306_spi
+    id: oled_display
+    model: "SSD1306 128x64"  # Change to "SH1106 128x64" if display looks offset
+    cs_pin: GPIO47
+    dc_pin: GPIO38
+    reset_pin: GPIO48
+    rotation: 0
+    update_interval: 5s  # Also updates on track change via text_sensor triggers
+    lambda: |-
+      // Get current state
+      auto state = id(external_media_player).state;
+      bool is_playing = (state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING);
+      bool is_paused = (state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PAUSED);
+      bool is_idle = (state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_IDLE);
+      
+      // Draw status icon
+      if (is_playing) {
+        it.printf(0, 0, id(font_icons), "\U000F040A");  // Play icon
+      } else if (is_paused) {
+        it.printf(0, 0, id(font_icons), "\U000F03E4");  // Pause icon
+      } else {
+        it.printf(0, 0, id(font_icons), "\U000F075F");  // Music note (idle)
+      }
+      
+      // Draw friendly name (top right)
+      it.printf(127, 2, id(font_small), TextAlign::TOP_RIGHT, "${friendly_name}");
+      
+      // Horizontal line separator
+      it.line(0, 22, 127, 22);
+      
+      if (is_idle || (id(track_title).state.empty() && id(track_artist).state.empty())) {
+        // Idle state - show ready message
+        it.printf(64, 38, id(font_body), TextAlign::CENTER, "Ready for music");
+        it.printf(64, 52, id(font_small), TextAlign::CENTER, "via Sendspin");
+      } else {
+        // Now playing info
+        // Track title (truncate if too long)
+        std::string title = id(track_title).state;
+        if (title.length() > 20) {
+          title = title.substr(0, 18) + "...";
+        }
+        it.printf(0, 26, id(font_title), "%s", title.c_str());
+        
+        // Artist
+        std::string artist = id(track_artist).state;
+        if (artist.length() > 24) {
+          artist = artist.substr(0, 22) + "...";
+        }
+        it.printf(0, 44, id(font_body), "%s", artist.c_str());
+        
+        // Album (if space permits)
+        std::string album = id(album_title).state;
+        if (!album.empty()) {
+          if (album.length() > 26) {
+            album = album.substr(0, 24) + "...";
+          }
+          it.printf(0, 56, id(font_small), "%s", album.c_str());
+        }
+      }
+
+# =============================================================================
+# TAS5805M SENSORS & CONTROLS
+# =============================================================================
+sensor:
+  - platform: tas5805m
+    faults_cleared:
+      name: "Times Faults Cleared"
+
+binary_sensor:
+  - platform: tas5805m
+    have_fault:
+      name: Any Faults
+    left_channel_dc_fault:
+      name: Left Channel DC Fault
+    right_channel_dc_fault:
+      name: Right Channel DC Fault
+    left_channel_over_current:
+      name: Left Channel Over Current
+    right_channel_over_current:
+      name: Right Channel Over Current
+    otp_crc_check:
+      name: CRC Check Fault
+    bq_write_failed:
+      name: BQ Write Failure
+    pcdd_over_voltage:
+      name: PCDD Over Voltage
+    pcdd_under_voltage:
+      name: PCDD Under Voltage
+    over_temp_shutdown:
+      name: Over Temperature Shutdown Fault
+    over_temp_warning:
+      name: Over Temperature Warning
+
+# =============================================================================
+# USER CONTROLS
+# =============================================================================
+number:
+  - platform: template
+    name: Announce Volume
+    id: announce_volume
+    icon: mdi:volume-source
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    restore_value: true
+    initial_value: 50
+    optimistic: true
+
+  # 15-band EQ - tune for your Aperion Intimus 6Bs
+  - platform: tas5805m
+    eq_gain_band20Hz:
+      name: EQ 20Hz
+    eq_gain_band31.5Hz:
+      name: EQ 31.5Hz
+    eq_gain_band50Hz:
+      name: EQ 50Hz
+    eq_gain_band80Hz:
+      name: EQ 80Hz
+    eq_gain_band125Hz:
+      name: EQ 125Hz
+    eq_gain_band200Hz:
+      name: EQ 200Hz
+    eq_gain_band315Hz:
+      name: EQ 315Hz
+    eq_gain_band500Hz:
+      name: EQ 500Hz
+    eq_gain_band800Hz:
+      name: EQ 800Hz
+    eq_gain_band1250Hz:
+      name: EQ 1250Hz
+    eq_gain_band2000Hz:
+      name: EQ 2000Hz
+    eq_gain_band3150Hz:
+      name: EQ 3150Hz
+    eq_gain_band5000Hz:
+      name: EQ 5000Hz
+    eq_gain_band8000Hz:
+      name: EQ 8000Hz
+    eq_gain_band16000Hz:
+      name: EQ 16000Hz
+
+switch:
+  - platform: tas5805m
+    enable_dac:
+      name: Enable Amplifier
+      id: enable_louder
+      restore_mode: ALWAYS_ON
+    enable_eq:
+      name: Enable EQ
+      restore_mode: RESTORE_DEFAULT_ON
+
+# =============================================================================
+# DIAGNOSTIC BUTTONS
+# =============================================================================
+button:
+  - platform: restart
+    name: Restart
+    entity_category: diagnostic

@@ -1,0 +1,306 @@
+# =============================================================================
+# ROOM CORRECTION SERVICES FOR LOUDER-ESP32S3
+# =============================================================================
+# Include this in your main config with:
+#   packages:
+#     room_correction: !include room_correction_services.yaml
+#
+# Or copy the relevant sections into your main YAML.
+#
+# Requires:
+#   - i2c bus with id: i2c_bus
+#   - tas5805m_biquad_i2c.h in the same directory
+# =============================================================================
+
+esphome:
+  includes:
+    - tas5805m_biquad_i2c.h
+
+# Enable web server for calibration UI
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+# Globals for calibration state
+globals:
+  - id: calibration_active
+    type: bool
+    initial_value: 'false'
+
+  - id: test_tone_frequency
+    type: float
+    initial_value: '1000.0'
+
+# =============================================================================
+# HOME ASSISTANT SERVICES
+# =============================================================================
+
+api:
+  services:
+    # =========================================================================
+    # Raw biquad programming (for advanced users)
+    # =========================================================================
+    - service: set_biquad
+      variables:
+        channel: int      # 0 = left, 1 = right, 2 = both
+        index: int        # 0-14 (which of the 15 biquads)
+        b0: float
+        b1: float
+        b2: float
+        a1: float
+        a2: float
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_biquad: ch=%d idx=%d", channel, index);
+            ESP_LOGI("room_cal", "  b0=%.6f b1=%.6f b2=%.6f a1=%.6f a2=%.6f", b0, b1, b2, a1, a2);
+
+            bool success = tas5805m_biquad::write_biquad(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                b0, b1, b2, a1, a2
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Biquad %d written successfully", index);
+            } else {
+                ESP_LOGE("room_cal", "Failed to write biquad %d", index);
+            }
+
+    # =========================================================================
+    # Parametric EQ (most common for room correction)
+    # =========================================================================
+    - service: set_parametric_eq
+      variables:
+        channel: int      # 0 = left, 1 = right, 2 = both
+        index: int        # 0-14
+        frequency: float  # Center frequency in Hz (20-20000)
+        gain_db: float    # Gain in dB (-15 to +6 recommended)
+        q: float          # Q factor (0.5 to 10)
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_parametric_eq: ch=%d idx=%d fc=%.1fHz gain=%.1fdB Q=%.2f",
+                     channel, index, frequency, gain_db, q);
+
+            bool success = tas5805m_biquad::write_parametric_eq(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                frequency, gain_db, q
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Parametric EQ written successfully");
+            } else {
+                ESP_LOGE("room_cal", "Failed to write parametric EQ");
+            }
+
+    # =========================================================================
+    # Low shelf filter (bass adjustment)
+    # =========================================================================
+    - service: set_low_shelf
+      variables:
+        channel: int
+        index: int
+        frequency: float  # Corner frequency in Hz
+        gain_db: float    # Gain in dB
+        slope: float      # Slope (0.5 to 2.0, 1.0 = 6dB/oct)
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_low_shelf: ch=%d idx=%d fc=%.1fHz gain=%.1fdB slope=%.2f",
+                     channel, index, frequency, gain_db, slope);
+
+            bool success = tas5805m_biquad::write_low_shelf(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                frequency, gain_db, slope
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Low shelf written successfully");
+            } else {
+                ESP_LOGE("room_cal", "Failed to write low shelf");
+            }
+
+    # =========================================================================
+    # High shelf filter (treble adjustment)
+    # =========================================================================
+    - service: set_high_shelf
+      variables:
+        channel: int
+        index: int
+        frequency: float
+        gain_db: float
+        slope: float
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_high_shelf: ch=%d idx=%d fc=%.1fHz gain=%.1fdB slope=%.2f",
+                     channel, index, frequency, gain_db, slope);
+
+            bool success = tas5805m_biquad::write_high_shelf(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                frequency, gain_db, slope
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "High shelf written successfully");
+            } else {
+                ESP_LOGE("room_cal", "Failed to write high shelf");
+            }
+
+    # =========================================================================
+    # High-pass filter (subsonic protection)
+    # =========================================================================
+    - service: set_highpass
+      variables:
+        channel: int
+        index: int
+        frequency: float  # Cutoff frequency in Hz
+        q: float          # Q factor (0.707 = Butterworth)
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_highpass: ch=%d idx=%d fc=%.1fHz Q=%.2f",
+                     channel, index, frequency, q);
+
+            bool success = tas5805m_biquad::write_highpass(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                frequency, q
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "High-pass written successfully");
+            } else {
+                ESP_LOGE("room_cal", "Failed to write high-pass");
+            }
+
+    # =========================================================================
+    # Low-pass filter (tweeter protection)
+    # =========================================================================
+    - service: set_lowpass
+      variables:
+        channel: int
+        index: int
+        frequency: float
+        q: float
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_lowpass: ch=%d idx=%d fc=%.1fHz Q=%.2f",
+                     channel, index, frequency, q);
+
+            bool success = tas5805m_biquad::write_lowpass(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                frequency, q
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Low-pass written successfully");
+            } else {
+                ESP_LOGE("room_cal", "Failed to write low-pass");
+            }
+
+    # =========================================================================
+    # Notch filter (kill specific resonance)
+    # =========================================================================
+    - service: set_notch
+      variables:
+        channel: int
+        index: int
+        frequency: float
+        q: float
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "set_notch: ch=%d idx=%d fc=%.1fHz Q=%.2f",
+                     channel, index, frequency, q);
+
+            bool success = tas5805m_biquad::write_notch(
+                id(i2c_bus), 0x2C,
+                channel, index,
+                frequency, q
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Notch written successfully");
+            } else {
+                ESP_LOGE("room_cal", "Failed to write notch");
+            }
+
+    # =========================================================================
+    # Reset single biquad to bypass
+    # =========================================================================
+    - service: reset_biquad
+      variables:
+        channel: int
+        index: int
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "reset_biquad: ch=%d idx=%d", channel, index);
+
+            bool success = tas5805m_biquad::reset_biquad(
+                id(i2c_bus), 0x2C,
+                channel, index
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Biquad %d reset to bypass", index);
+            } else {
+                ESP_LOGE("room_cal", "Failed to reset biquad %d", index);
+            }
+
+    # =========================================================================
+    # Reset ALL biquads to bypass (flat response)
+    # =========================================================================
+    - service: reset_all_biquads
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "Resetting all biquads to bypass");
+
+            bool success = tas5805m_biquad::reset_all_biquads(id(i2c_bus), 0x2C);
+
+            if (success) {
+                ESP_LOGI("room_cal", "All biquads reset to bypass - flat response");
+            } else {
+                ESP_LOGE("room_cal", "Failed to reset some biquads");
+            }
+
+# =============================================================================
+# CALIBRATION SCRIPTS
+# =============================================================================
+
+script:
+  # Play a sine sweep for measurement (state tracking only)
+  - id: play_test_sweep
+    mode: single
+    then:
+      - lambda: |-
+          id(calibration_active) = true;
+          ESP_LOGI("room_cal", "Starting test sweep");
+      - delay: 6s
+      - lambda: |-
+          id(calibration_active) = false;
+          ESP_LOGI("room_cal", "Test sweep complete");
+
+  # Apply a stored calibration profile
+  - id: apply_stored_calibration
+    mode: single
+    then:
+      - lambda: |-
+          // TODO: Load from NVS and apply
+          ESP_LOGI("room_cal", "Applying stored calibration profile");
+
+# =============================================================================
+# STATUS SENSORS
+# =============================================================================
+
+binary_sensor:
+  - platform: template
+    name: "Room Calibration Active"
+    id: room_cal_active_sensor
+    lambda: return id(calibration_active);
+
+text_sensor:
+  - platform: template
+    name: "Active Calibration Profile"
+    id: active_cal_profile
+    lambda: return std::string("default");

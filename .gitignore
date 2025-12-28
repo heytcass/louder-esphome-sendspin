@@ -1,0 +1,29 @@
+# ESPHome build artifacts
+/.esphome/
+__pycache__/
+*.pyc
+
+# Secrets (never commit)
+secrets.yaml
+secrets.*.yaml
+
+# Claude Code
+/.claude/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar.gz
+
+# Temporary directories
+/mnt/
