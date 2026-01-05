@@ -63,12 +63,12 @@ logger:
     spi: WARN
 
 api:
-  # encryption:
-  #   key: !secret api_encryption_key
+  encryption:
+    key: !secret api_encryption_key
 
 ota:
   - platform: esphome
-    # password: !secret esphome_ota_password
+    password: !secret esphome_ota_password
 
 http_request:
 
