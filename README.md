@@ -1,107 +1,87 @@
-# TAS5805M Room Correction for Louder-ESP32S3
+# Louder-ESP32S3 Sendspin Speaker
 
-Phone-based room measurement and parametric EQ correction that leverages the TAS5805M's full DSP capabilities. Designed for Sonocotta's Louder-ESP32S3 with Sendspin multi-room audio.
+ESPHome configuration for the Sonocotta Louder-ESP32S3 as a Sendspin multi-room audio endpoint. Features W5500 ethernet for reliable streaming, OLED now-playing display, and optional room correction via the TAS5805M's built-in DSP.
 
 ## Overview
 
-This system provides Sonos Trueplay-like room correction for Sonocotta's Louder-ESP32S3 boards, using your phone as the measurement microphone at the listening position.
+This project turns the Louder-ESP32S3 into a network speaker for the Sendspin multi-room audio system (ESPHome beta). It integrates with Home Assistant as a media player with full playback control, metadata display, and announcement support.
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌──────────┐
-│   Phone     │────►│   ESP32-S3  │────►│  TAS5805M   │────►│ Speakers │
-│  (mic+UI)   │◄────│ (ESPHome)   │◄────│    DSP      │     │          │
-└─────────────┘     └─────────────┘     └─────────────┘     └──────────┘
-     Web Audio API      Home Assistant      15 biquads/ch      Bookshelf
-     FFT analysis       service calls       48kHz DSP          speakers
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Sendspin       │────►│  Louder-ESP32S3 │────►│    Speakers     │
+│  Server         │     │  (this config)  │     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+   Multi-room              W5500 Ethernet          Passive
+   streaming               TAS5805M DAC            bookshelf
+                           OLED display
 ```
 
 ## Features
 
-- **Phone-based measurement** - No special equipment needed
-- **Full DSP utilization** - 15 programmable biquad filters per channel (30 total)
-- **Arbitrary parametric EQ** - Any frequency, any Q, any gain (not fixed bands)
-- **Home Assistant integration** - Services exposed for automation and manual control
-- **Multiple filter types** - Parametric EQ, shelves, high/low pass, notch
-- **Sendspin compatible** - Works with multi-room audio streaming
-
-## Project Structure
-
-```
-├── louder-s3-sendspin-ethernet-oled.yaml  # Main ESPHome configuration
-├── room_correction_services.yaml           # HA services package (biquad programming)
-├── tas5805m_biquad_i2c.h                   # I2C implementation for ESPHome
-├── calibrate.html                          # Phone-based measurement web UI
-├── index.html                              # Room correction management interface
-├── ARCHITECTURE.md                         # Technical deep-dive on system design
-└── CLAUDE.md                               # Claude Code project instructions
-```
-
-## Quick Start
-
-### 1. Flash the ESPHome Configuration
-
-The main config already includes room correction services via packages:
-
-```yaml
-packages:
-  room_correction: !include room_correction_services.yaml
-```
-
-Flash to your Louder-ESP32S3:
-```bash
-esphome run louder-s3-sendspin-ethernet-oled.yaml
-```
-
-### 2. Use Home Assistant Services
-
-After flashing, these services are available in Home Assistant:
-
-| Service | Description |
-|---------|-------------|
-| `set_parametric_eq` | Add a parametric EQ filter (frequency, gain, Q) |
-| `set_low_shelf` | Add a low shelf filter (bass adjustment) |
-| `set_high_shelf` | Add a high shelf filter (treble adjustment) |
-| `set_highpass` | Add a high-pass filter (subsonic protection) |
-| `set_lowpass` | Add a low-pass filter (tweeter protection) |
-| `set_notch` | Add a notch filter (kill resonances) |
-| `set_biquad` | Program raw biquad coefficients |
-| `reset_biquad` | Reset single biquad to bypass |
-| `reset_all_biquads` | Reset all filters to flat response |
-
-### 3. Apply Room Correction
-
-Example: Cut a room mode at 80Hz:
-```yaml
-service: esphome.louder_s3_kitchen_set_parametric_eq
-data:
-  channel: 2      # 0=left, 1=right, 2=both
-  index: 0        # Biquad slot 0-14
-  frequency: 80   # Hz
-  gain_db: -6     # dB (negative = cut)
-  q: 2            # Q factor
-```
-
-Reset to flat:
-```yaml
-service: esphome.louder_s3_kitchen_reset_all_biquads
-```
-
-### 4. Phone-Based Calibration (Optional)
-
-For automated measurement and correction:
-
-1. Host `calibrate.html` on your network (ESPHome web server, Home Assistant, etc.)
-2. Open on your phone at the listening position
-3. Allow microphone access
-4. Follow the measurement wizard
-5. Review and apply calculated filters
+- **Sendspin streaming** - Synchronized multi-room audio playback
+- **Home Assistant integration** - Media player entity with full control
+- **Announcement support** - TTS/announcements with automatic ducking
+- **Now playing display** - OLED shows track, artist, album
+- **Ethernet connectivity** - W5500 for reliable, low-latency streaming
+- **15-band graphic EQ** - Adjustable via Home Assistant
+- **Room correction** - Optional parametric EQ via TAS5805M biquads
 
 ## Hardware Requirements
 
 - **Sonocotta Louder-ESP32S3** board
-- **TAS5805M DAC** (integrated on Louder board)
-- **W5500 Ethernet module** (recommended for Sendspin reliability)
-- **Passive speakers** (e.g., bookshelf speakers)
+- **W5500 SPI Ethernet module** (recommended)
+- **128x64 SSD1306/SH1106 OLED** (SPI)
+- **Passive speakers** (bookshelf, etc.)
+- **65W USB-C PD power supply**
+
+## Quick Start
+
+### 1. Clone and Configure
+
+```bash
+git clone https://github.com/yourusername/louder-esphome-sendspin.git
+cd louder-esphome-sendspin
+
+# Copy and edit secrets
+cp secrets.yaml.example secrets.yaml
+# Edit secrets.yaml with your API key and OTA password
+```
+
+### 2. Customize for Your Zone
+
+Edit `louder-s3-sendspin-ethernet-oled.yaml`:
+
+```yaml
+substitutions:
+  name: "louder-s3-kitchen"      # Change per zone
+  friendly_name: "Kitchen Speaker"  # Change per zone
+```
+
+### 3. Flash
+
+```bash
+esphome run louder-s3-sendspin-ethernet-oled.yaml
+```
+
+### 4. Add to Home Assistant
+
+The device will be auto-discovered. Add it via the ESPHome integration.
+
+## Project Structure
+
+```
+├── louder-s3-sendspin-ethernet-oled.yaml  # Main ESPHome config
+├── room_correction_services.yaml          # Room correction HA services
+├── tas5805m_biquad_i2c.h                  # Biquad I2C implementation
+├── tas5805m_profile_manager.h             # EQ profile storage
+├── calibrate.html                         # Phone calibration UI
+├── index.html                             # Room correction UI
+├── secrets.yaml.example                   # Example secrets
+└── docs/
+    ├── GETTING_STARTED.md                 # Detailed setup guide
+    ├── PROFILE_USAGE.md                   # Profile management
+    └── TESTING_CHECKLIST.md               # Testing procedures
+```
 
 ## Pin Configuration
 
@@ -114,52 +94,80 @@ For automated measurement and correction:
 | I2C SDA | 8 |
 | I2C SCL | 9 |
 | Ethernet CS | 10 |
+| Ethernet INT | 6 |
+| Ethernet RST | 5 |
 | OLED CS | 47 |
 | OLED DC | 38 |
 | OLED RST | 48 |
 
-## TAS5805M DSP Details
+## Room Correction (Optional)
 
-The TAS5805M has 15 biquad filters per channel, each implementing:
+The configuration includes optional room correction via the TAS5805M's 30 programmable biquad filters (15 per channel). This is included as a package and can be removed if not needed.
 
+### Home Assistant Services
+
+When room correction is enabled, these services are available:
+
+| Service | Description |
+|---------|-------------|
+| `set_parametric_eq` | Parametric EQ (frequency, gain, Q) |
+| `set_low_shelf` / `set_high_shelf` | Shelf filters |
+| `set_highpass` / `set_lowpass` | HP/LP filters |
+| `set_notch` | Notch filter |
+| `reset_all_biquads` | Reset to flat response |
+| `save_profile` / `load_profile` | Manage EQ profiles |
+
+### Example: Cut a Room Mode
+
+```yaml
+service: esphome.louder_s3_kitchen_set_parametric_eq
+data:
+  channel: 2      # 0=left, 1=right, 2=both
+  index: 0        # Biquad slot 0-14
+  frequency: 80   # Hz
+  gain_db: -6     # dB (negative = cut)
+  q: 2            # Q factor
 ```
-        b0 + b1*z^-1 + b2*z^-2
-H(z) = ────────────────────────
-        1 + a1*z^-1 + a2*z^-2
+
+### Phone-Based Calibration
+
+For automated measurement and correction:
+
+1. Open `http://louder-s3-kitchen.local/calibrate` on your phone
+2. Position phone at listening position
+3. Allow microphone access
+4. Follow measurement wizard
+5. Review and apply calculated filters
+
+## Removing Room Correction
+
+To use as a simple Sendspin speaker without room correction, remove this from the main config:
+
+```yaml
+packages:
+  room_correction: !include room_correction_services.yaml
 ```
-
-Coefficients are stored in 9.23 fixed-point format (9 bits integer, 23 bits fractional).
-
-### Register Map
-
-- **Book 0xAA**: DSP coefficient pages
-- **Left channel**: Pages 0x24-0x27
-- **Right channel**: Pages 0x32-0x35
-- **20 bytes per biquad**: b0, b1, b2, a1, a2 (big-endian, a1/a2 sign-inverted)
-
-## Limitations
-
-- **Phone mic accuracy** - Good for room modes (±6dB), not laboratory precision
-- **Bass response** - Phone mics roll off below ~80Hz
-- **High frequencies** - Limited accuracy above ~12kHz
-- **Single position** - Optimizes for one listening spot
 
 ## Troubleshooting
 
-### "Filters not applying"
-- Check ESPHome logs for I2C errors
-- Verify TAS5805M I2C address (0x2C)
-- Ensure the DAC is enabled
+### No audio playback
+- Check ethernet connection (link LED on W5500)
+- Verify Sendspin server is running
+- Check ESPHome logs for errors
 
-### "Sound quality degraded"
-- Reduce boost amounts (cuts are safer than boosts)
-- Check for filter instability (very high Q with boost)
-- Try fewer filters
+### Audio dropouts
+- Use ethernet instead of WiFi for reliability
+- Check network congestion
+- Verify PSRAM is detected in logs
 
-### "I2C errors in logs"
-- Check I2C wiring (SDA=GPIO8, SCL=GPIO9)
-- Verify 400kHz bus speed
-- Ensure no bus contention with other devices
+### OLED not displaying
+- Check SPI wiring (CS=47, DC=38, RST=48)
+- Try changing model from `SSD1306` to `SH1106`
+
+### Room correction not applying
+- Check I2C bus logs for errors
+- Verify TAS5805M address (0x2C)
+- Ensure DAC is enabled
 
 ## Credits
 
@@ -169,4 +177,4 @@ Coefficients are stored in 9.23 fixed-point format (9 bits integer, 23 bits frac
 
 ## License
 
-MIT License - Use freely, attribution appreciated.
+MIT License

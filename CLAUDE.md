@@ -4,14 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ESPHome configuration and room correction system for Sonocotta's Louder-ESP32S3 audio board with TAS5805M DAC. Provides phone-based room measurement and parametric EQ correction similar to Sonos Trueplay.
+ESPHome configuration for the Louder-ESP32S3 as a **Sendspin multi-room audio target**. This turns Sonocotta's Louder-ESP32S3 board into a network-connected speaker endpoint for the Sendspin streaming system, with optional room correction via the TAS5805M's built-in DSP.
+
+**Primary Purpose:** Sendspin streaming endpoint with Home Assistant integration
+**Secondary Feature:** Room correction / parametric EQ via TAS5805M biquad filters
 
 **Hardware Stack:**
-- ESP32-S3 with PSRAM (octal mode, 80MHz)
-- TAS5805M Class-D amplifier with 15 programmable biquads per channel
-- W5500 SPI Ethernet module
-- SSD1306/SH1106 OLED display (SPI)
-- Sendspin multi-room audio streaming (beta)
+- Sonocotta Louder-ESP32S3 (ESP32-S3 + TAS5805M Class-D amplifier)
+- W5500 SPI Ethernet module (recommended for streaming reliability)
+- SSD1306/SH1106 OLED display (shows now playing info)
+- Passive bookshelf speakers
 
 ## Build & Deploy
 
@@ -30,26 +32,13 @@ esphome logs louder-s3-sendspin-ethernet-oled.yaml
 
 ### Main Configuration
 `louder-s3-sendspin-ethernet-oled.yaml` - Complete ESPHome config including:
+- Sendspin media source and group media player
 - TAS5805M DAC via `mrtoy-me/esphome-tas5805m@beta`
-- Sendspin media streaming with mixer/resampler pipeline
+- Audio pipeline: Sendspin → Resampler → Mixer → I2S → TAS5805M
+- Announcement support with automatic ducking
+- OLED display showing track title, artist, album
 - 15-band graphic EQ exposed as Home Assistant number entities
-- OLED display showing track metadata
-
-### Room Correction System
-Extends the graphic EQ with arbitrary parametric EQ via direct biquad programming:
-
-| File | Purpose |
-|------|---------|
-| `room_correction_services.yaml` | Home Assistant services for biquad programming |
-| `tas5805m_biquad.hpp` | C++ biquad coefficient calculation and I2C register map |
-| `calibrate.html` | Web UI for phone-based room measurement |
-| `index.html` | Room correction management web interface |
-
-### Biquad Register Map (TAS5805M)
-- Book 0xAA contains all biquad coefficients
-- Left channel: Pages 0x24-0x26, Right channel: Pages 0x26-0x28
-- Each biquad: 20 bytes (5 coefficients × 4 bytes, 9.23 fixed-point)
-- a1/a2 coefficients are sign-inverted when written
+- W5500 ethernet networking
 
 ### Audio Pipeline
 ```
@@ -58,35 +47,52 @@ Sendspin Source → Resampler (48kHz) → Mixer → I2S Speaker → TAS5805M →
                    Announcement → Resampler → (ducking applied)
 ```
 
-## Key ESPHome Patterns
-
-### External Components (from GitHub PRs)
+### External Components (from ESPHome PRs)
 Components pulled from unmerged ESPHome PRs for Sendspin beta:
-- `mixer`, `resampler`, `audio`, `media_player`, `sendspin`
-- Use `refresh: 0s` to cache and avoid re-fetching
+- `sendspin`, `mdns` - PR #12284
+- `mixer` - PR #12253
+- `resampler` - PR #12254
+- `audio` - PR #12256
+- `media_player` - PR #12258
+- `file`, `http_request`, `media_source`, `speaker_source` - PR #12429
+- `tas5805m` - `mrtoy-me/esphome-tas5805m@beta`
 
-### TAS5805M Services
-Home Assistant service calls for room correction:
-- `set_biquad`: Raw coefficient programming
-- `set_parametric_eq`: Frequency/gain/Q to biquad conversion
-- `set_low_shelf`, `set_high_shelf`, `set_highpass`: Filter types
-- `reset_eq`: Clear all biquads to passthrough
+Use `refresh: 0s` to cache components and avoid re-fetching on each compile.
 
-### Fixed-Point Format
-TAS5805M uses 9.23 signed fixed-point:
-```cpp
-int32_t float_to_9_23(float value) {
-    return static_cast<int32_t>(value * 8388608.0f);  // 2^23
-}
-```
+### Room Correction Package (Optional Feature)
+Included via `packages: room_correction: !include room_correction_services.yaml`
 
-## Web Calibration Flow
+| File | Purpose |
+|------|---------|
+| `room_correction_services.yaml` | Home Assistant services for EQ/biquad programming |
+| `tas5805m_biquad_i2c.h` | Low-level I2C biquad coefficient writing |
+| `tas5805m_profile_manager.h` | Save/load EQ profiles to NVS |
+| `calibrate.html` | Phone-based room measurement web UI |
+| `index.html` | Room correction management interface |
 
-1. Phone opens `http://louder-s3-kitchen.local/calibrate`
-2. Browser captures room response via Web Audio API during sine sweep
-3. FFT analysis calculates inverse EQ filters
-4. Biquad coefficients sent to ESP32 via Home Assistant API
-5. Coefficients stored in NVS for persistence across reboots
+### Room Correction Services
+Home Assistant services exposed when room correction package is included:
+- `set_parametric_eq` - Frequency/gain/Q parametric filter
+- `set_low_shelf`, `set_high_shelf` - Shelf filters
+- `set_highpass`, `set_lowpass` - HP/LP filters
+- `set_notch` - Notch filter
+- `set_biquad` - Raw coefficient programming
+- `reset_biquad`, `reset_all_biquads` - Reset filters
+- `save_profile`, `load_profile`, `delete_profile` - Profile management
+- `set_active_profile`, `clear_active_profile` - Boot profile selection
+
+### Profile Management
+- Up to 5 named profiles stored in NVS
+- Profiles auto-load on boot if set as active
+- Each profile stores 30 biquads (15 per channel)
+- CRC32 validation for data integrity
+
+### TAS5805M DSP Details
+- 15 biquad filters per channel (30 total)
+- Book 0xAA contains coefficients
+- Left channel: Pages 0x24-0x27, Right channel: Pages 0x32-0x35
+- 9.23 fixed-point format (coefficients × 2^23)
+- a1/a2 coefficients are sign-inverted when written
 
 ## Hardware Pin Assignments
 
@@ -99,6 +105,40 @@ int32_t float_to_9_23(float value) {
 | I2C SDA | 8 |
 | I2C SCL | 9 |
 | Ethernet CS | 10 |
+| Ethernet INT | 6 |
+| Ethernet RST | 5 |
 | OLED CS | 47 |
 | OLED DC | 38 |
 | OLED RST | 48 |
+
+## Project Structure
+
+```
+├── louder-s3-sendspin-ethernet-oled.yaml  # Main ESPHome config
+├── room_correction_services.yaml          # HA services package
+├── tas5805m_biquad_i2c.h                  # I2C biquad implementation
+├── tas5805m_profile_manager.h             # Profile storage/management
+├── calibrate.html                         # Phone calibration web UI
+├── index.html                             # Room correction management UI
+├── secrets.yaml.example                   # Example secrets file
+├── ARCHITECTURE.md                        # Technical deep-dive
+├── GETTING_STARTED.md                     # Setup guide
+├── PROFILE_USAGE.md                       # Profile management guide
+└── TESTING_CHECKLIST.md                   # Testing procedures
+```
+
+## Key Patterns
+
+### Substitutions for Multi-Zone Deployment
+Change these per zone:
+```yaml
+substitutions:
+  name: "louder-s3-kitchen"
+  friendly_name: "Kitchen Speaker"
+```
+
+### Announcement Ducking
+Media audio ducks 40dB during announcements, then restores with 1s fade.
+
+### PSRAM Configuration
+ESP32-S3 octal PSRAM at 80MHz with optimized sdkconfig for audio streaming.
