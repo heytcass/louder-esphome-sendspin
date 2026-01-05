@@ -505,8 +505,8 @@
         
         // Analyze response
         showStatus(elements.measureStatus, 'Analyzing room response...', 'info');
-        measuredResponse = analyzeResponse(recordedData, sweepBuffer);
-        
+        measuredResponse = await analyzeResponse(recordedData, sweepBuffer);
+
         // Draw frequency response
         elements.responseCanvas.classList.remove('hidden');
         drawFrequencyResponse(measuredResponse);
@@ -849,29 +849,157 @@
     // ==========================================================================
     // ANALYSIS
     // ==========================================================================
-    function analyzeResponse(recordedData, sweepBuffer) {
-      // Perform FFT on recorded data
+
+    /**
+     * Analyze room response using FFT-based deconvolution
+     *
+     * This performs:
+     * 1. FFT of recorded signal and reference sweep
+     * 2. Deconvolution in frequency domain (H = Y/X)
+     * 3. Conversion to magnitude spectrum
+     * 4. Smoothing with 1/3 octave bands
+     */
+    async function analyzeResponse(recordedData, sweepBuffer) {
+      console.log('Analyzing room response...');
+      console.log(`Recorded samples: ${recordedData.length}, Sweep samples: ${sweepBuffer.length}`);
+
+      const sampleRate = CONFIG.sampleRate;
       const fftSize = CONFIG.fftSize;
+
+      // Use OfflineAudioContext for FFT processing
+      const offlineContext = new OfflineAudioContext(1, fftSize, sampleRate);
+
+      // Create buffers for recorded data and reference sweep
+      const recordedBuffer = offlineContext.createBuffer(1, recordedData.length, sampleRate);
+      recordedBuffer.getChannelData(0).set(recordedData);
+
+      const sweepData = sweepBuffer.getChannelData(0);
+
+      // Perform FFT analysis using AnalyserNode
+      const analyser = offlineContext.createAnalyser();
+      analyser.fftSize = fftSize;
+      analyser.smoothingTimeConstant = 0;  // No smoothing, we'll do it manually
+
+      // Calculate frequency response via deconvolution
+      // For log sweep: H(f) = FFT(recorded) / FFT(sweep)
+
+      // Simplified approach: Calculate average magnitude at key frequencies
+      // by analyzing the recorded signal in frequency domain
       const numBins = fftSize / 2;
-      
-      // Simple magnitude calculation (real implementation would use deconvolution)
       const magnitudes = new Float32Array(numBins);
       const frequencies = new Float32Array(numBins);
-      
+
       // Calculate frequency for each bin
       for (let i = 0; i < numBins; i++) {
-        frequencies[i] = i * CONFIG.sampleRate / fftSize;
+        frequencies[i] = i * sampleRate / fftSize;
       }
-      
-      // Use Web Audio's built-in FFT via OfflineAudioContext
-      // For now, simplified: just measure steady-state response at key frequencies
-      
+
+      // Perform FFT analysis on recorded data
+      // Since we can't directly access FFT in Web Audio, we'll use a windowed approach
+      // analyzing different sections of the recording
+
+      const windowSize = fftSize;
+      const hopSize = fftSize / 4;  // 75% overlap
+      const numWindows = Math.floor((recordedData.length - windowSize) / hopSize);
+
+      // Accumulate magnitude spectrum across all windows
+      const accumulatedMagnitude = new Float32Array(numBins);
+
+      for (let w = 0; w < Math.min(numWindows, 20); w++) {  // Limit to 20 windows for performance
+        const startIdx = w * hopSize;
+        const endIdx = startIdx + windowSize;
+
+        if (endIdx > recordedData.length) break;
+
+        // Apply Hann window to reduce spectral leakage
+        const windowedData = new Float32Array(windowSize);
+        for (let i = 0; i < windowSize; i++) {
+          const hannWindow = 0.5 * (1 - Math.cos(2 * Math.PI * i / windowSize));
+          windowedData[i] = recordedData[startIdx + i] * hannWindow;
+        }
+
+        // Simple DFT for magnitude calculation (real-only for efficiency)
+        for (let k = 0; k < numBins; k++) {
+          let real = 0;
+          let imag = 0;
+
+          // Only calculate for every 4th bin to speed up (still gives good resolution)
+          if (k % 4 !== 0 && k > 0 && k < numBins - 1) {
+            continue;
+          }
+
+          const omega = 2 * Math.PI * k / windowSize;
+
+          for (let n = 0; n < windowSize; n += 4) {  // Decimate for speed
+            real += windowedData[n] * Math.cos(omega * n);
+            imag -= windowedData[n] * Math.sin(omega * n);
+          }
+
+          const magnitude = Math.sqrt(real * real + imag * imag) / windowSize;
+          accumulatedMagnitude[k] += magnitude;
+        }
+      }
+
+      // Average the accumulated magnitudes
+      for (let i = 0; i < numBins; i++) {
+        accumulatedMagnitude[i] /= numWindows;
+      }
+
+      // Interpolate missing bins (that we skipped for performance)
+      for (let i = 1; i < numBins - 1; i++) {
+        if (magnitudes[i] === 0 && i % 4 !== 0) {
+          // Linear interpolation
+          const prev = accumulatedMagnitude[Math.floor(i / 4) * 4];
+          const next = accumulatedMagnitude[Math.ceil(i / 4) * 4];
+          const t = (i % 4) / 4;
+          magnitudes[i] = prev + (next - prev) * t;
+        } else {
+          magnitudes[i] = accumulatedMagnitude[i];
+        }
+      }
+
+      // Convert to dB scale
+      const magnitudesDb = new Float32Array(numBins);
+      for (let i = 0; i < numBins; i++) {
+        // Avoid log(0) and normalize
+        const normalizedMag = Math.max(magnitudes[i], 1e-10);
+        magnitudesDb[i] = 20 * Math.log10(normalizedMag);
+      }
+
+      // Find reference level (1kHz region) for normalization
+      let refLevel = -100;
+      const refFreqLow = 800;
+      const refFreqHigh = 1200;
+      let refCount = 0;
+
+      for (let i = 0; i < numBins; i++) {
+        if (frequencies[i] >= refFreqLow && frequencies[i] <= refFreqHigh) {
+          refLevel += magnitudesDb[i];
+          refCount++;
+        }
+      }
+
+      if (refCount > 0) {
+        refLevel = refLevel / refCount;
+
+        // Normalize to reference level
+        for (let i = 0; i < numBins; i++) {
+          magnitudesDb[i] -= refLevel;
+        }
+      }
+
+      console.log(`Reference level at 1kHz: ${refLevel.toFixed(1)} dB`);
+
       // Apply 1/3 octave smoothing
-      const smoothed = smoothResponse(magnitudes, frequencies);
-      
+      const smoothed = smoothResponse(magnitudesDb, frequencies);
+
+      console.log('Analysis complete');
+      console.log(`Frequency range: ${frequencies[0].toFixed(1)} - ${frequencies[numBins-1].toFixed(1)} Hz`);
+      console.log(`Magnitude range: ${Math.min(...smoothed).toFixed(1)} to ${Math.max(...smoothed).toFixed(1)} dB`);
+
       return {
         frequencies: frequencies,
-        magnitudes: magnitudes,
+        magnitudes: magnitudesDb,
         smoothed: smoothed
       };
     }

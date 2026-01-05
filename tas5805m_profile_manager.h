@@ -53,7 +53,7 @@ struct BiquadCoefficients {
                 fabs(a1) < 0.0001f &&
                 fabs(a2) < 0.0001f);
     }
-};
+} __attribute__((packed));
 
 /**
  * Complete calibration profile
@@ -121,7 +121,7 @@ struct CalibrationProfile {
             }
         }
     }
-};
+} __attribute__((packed));
 
 // =============================================================================
 // PROFILE MANAGER CLASS

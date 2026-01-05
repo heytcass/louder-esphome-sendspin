@@ -62,8 +62,16 @@ constexpr uint8_t PAGE_RIGHT_BQ[15] = {
  * Convert float to TAS5805M 9.23 fixed-point format
  */
 inline int32_t float_to_9_23(float value) {
+    // Check for invalid values (NaN, Infinity)
+    if (!std::isfinite(value)) {
+        ESP_LOGE("tas5805m_bq", "Invalid coefficient: %f (NaN or Inf), using bypass", value);
+        return 0;  // Return bypass coefficient
+    }
+
+    // Clamp to valid range for 9.23 format
     if (value > 255.999999f) value = 255.999999f;
     if (value < -256.0f) value = -256.0f;
+
     return static_cast<int32_t>(value * (1 << 23));
 }
 
@@ -90,35 +98,61 @@ public:
         : bus_(bus), address_(address) {}
 
     /**
-     * Write a single byte to a register
+     * Write a single byte to a register (with retry logic)
      */
     bool write_byte(uint8_t reg, uint8_t value) {
-        uint8_t data[2] = {reg, value};
-        auto err = bus_->write(address_, data, 2, true);
-        if (err != esphome::i2c::ERROR_OK) {
-            ESP_LOGE("tas5805m_bq", "I2C write failed: reg=0x%02X val=0x%02X err=%d",
-                     reg, value, (int)err);
-            return false;
+        const int MAX_RETRIES = 3;
+
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            uint8_t data[2] = {reg, value};
+            auto err = bus_->write(address_, data, 2, true);
+
+            if (err == esphome::i2c::ERROR_OK) {
+                return true;  // Success
+            }
+
+            ESP_LOGW("tas5805m_bq", "I2C write failed (attempt %d/%d): reg=0x%02X val=0x%02X err=%d",
+                     attempt + 1, MAX_RETRIES, reg, value, (int)err);
+
+            if (attempt < MAX_RETRIES - 1) {
+                delay(5);  // Wait 5ms before retry
+            }
         }
-        return true;
+
+        ESP_LOGE("tas5805m_bq", "I2C write failed after %d attempts: reg=0x%02X val=0x%02X",
+                 MAX_RETRIES, reg, value);
+        return false;
     }
 
     /**
-     * Write multiple bytes starting at a register
+     * Write multiple bytes starting at a register (with retry logic)
      */
     bool write_bytes(uint8_t reg, const uint8_t* data, size_t len) {
-        // Allocate buffer for register + data
-        std::vector<uint8_t> buffer(len + 1);
-        buffer[0] = reg;
-        memcpy(&buffer[1], data, len);
+        const int MAX_RETRIES = 3;
 
-        auto err = bus_->write(address_, buffer.data(), buffer.size(), true);
-        if (err != esphome::i2c::ERROR_OK) {
-            ESP_LOGE("tas5805m_bq", "I2C write_bytes failed: reg=0x%02X len=%d err=%d",
-                     reg, (int)len, (int)err);
-            return false;
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            // Allocate buffer for register + data
+            std::vector<uint8_t> buffer(len + 1);
+            buffer[0] = reg;
+            memcpy(&buffer[1], data, len);
+
+            auto err = bus_->write(address_, buffer.data(), buffer.size(), true);
+
+            if (err == esphome::i2c::ERROR_OK) {
+                return true;  // Success
+            }
+
+            ESP_LOGW("tas5805m_bq", "I2C write_bytes failed (attempt %d/%d): reg=0x%02X len=%d err=%d",
+                     attempt + 1, MAX_RETRIES, reg, (int)len, (int)err);
+
+            if (attempt < MAX_RETRIES - 1) {
+                delay(5);  // Wait 5ms before retry
+            }
         }
-        return true;
+
+        ESP_LOGE("tas5805m_bq", "I2C write_bytes failed after %d attempts: reg=0x%02X len=%d",
+                 MAX_RETRIES, reg, (int)len);
+        return false;
     }
 
     /**
@@ -127,10 +161,16 @@ public:
     bool select_book_page(uint8_t book, uint8_t page) {
         // First go to page 0 to access book register
         if (!write_byte(REG_PAGE_SELECT, 0x00)) return false;
+        delay(2);  // Wait for page select to take effect
+
         // Select book
         if (!write_byte(REG_BOOK_SELECT, book)) return false;
+        delay(2);  // Wait for book select to take effect
+
         // Select page within book
         if (!write_byte(REG_PAGE_SELECT, page)) return false;
+        delay(2);  // Wait for page select to take effect
+
         return true;
     }
 
@@ -213,6 +253,7 @@ inline bool write_biquad(esphome::i2c::I2CBus* bus, uint8_t address,
             ESP_LOGI("tas5805m_bq", "Left channel BQ%d written (page=0x%02X offset=0x%02X)",
                      index, page, offset);
         }
+        delay(5);  // Wait for TAS5805M to process coefficient write
     }
 
     // Write to right channel if requested
@@ -232,6 +273,7 @@ inline bool write_biquad(esphome::i2c::I2CBus* bus, uint8_t address,
             ESP_LOGI("tas5805m_bq", "Right channel BQ%d written (page=0x%02X offset=0x%02X)",
                      index, page, offset);
         }
+        delay(5);  // Wait for TAS5805M to process coefficient write
     }
 
     // Return to normal operation
