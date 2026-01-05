@@ -285,6 +285,29 @@
       <button id="btnAB" class="secondary hidden" style="margin-top: 8px">A/B Compare</button>
       <div class="status info hidden" id="applyStatus"></div>
     </div>
+
+    <!-- Step 5: Save Profile -->
+    <div class="card" id="step5">
+      <h2><span class="step-number">5</span> Save Profile</h2>
+      <p class="instructions">Save this calibration for automatic loading on boot:</p>
+      <input type="text" id="profileName" placeholder="Profile name (e.g., 'Living Room')"
+             style="width: 100%; padding: 12px; border-radius: 6px; border: 1px solid var(--accent);
+                    background: var(--bg); color: var(--text); margin-bottom: 12px; font-size: 1rem;">
+      <button id="btnSaveProfile" disabled>Save Profile</button>
+      <button id="btnSetActive" class="secondary hidden" style="margin-top: 8px">Set as Active Profile</button>
+      <div class="status info hidden" id="profileStatus"></div>
+
+      <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--accent);">
+        <p class="instructions" style="margin-bottom: 12px;">Load a saved profile:</p>
+        <select id="profileSelect" style="width: 100%; padding: 12px; border-radius: 6px;
+                border: 1px solid var(--accent); background: var(--bg); color: var(--text);
+                margin-bottom: 12px; font-size: 1rem;">
+          <option value="">-- Select a profile --</option>
+        </select>
+        <button id="btnLoadProfile" disabled class="secondary">Load Profile</button>
+        <button id="btnDeleteProfile" disabled class="secondary" style="margin-top: 8px; background: var(--highlight);">Delete Profile</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -325,6 +348,13 @@
       btnMeasure: document.getElementById('btnMeasure'),
       btnApply: document.getElementById('btnApply'),
       btnAB: document.getElementById('btnAB'),
+      btnSaveProfile: document.getElementById('btnSaveProfile'),
+      btnSetActive: document.getElementById('btnSetActive'),
+      btnLoadProfile: document.getElementById('btnLoadProfile'),
+      btnDeleteProfile: document.getElementById('btnDeleteProfile'),
+      profileName: document.getElementById('profileName'),
+      profileSelect: document.getElementById('profileSelect'),
+      profileStatus: document.getElementById('profileStatus'),
       micStatus: document.getElementById('micStatus'),
       levelStatus: document.getElementById('levelStatus'),
       levelMeter: document.getElementById('levelMeter'),
@@ -338,7 +368,8 @@
       step1: document.getElementById('step1'),
       step2: document.getElementById('step2'),
       step3: document.getElementById('step3'),
-      step4: document.getElementById('step4')
+      step4: document.getElementById('step4'),
+      step5: document.getElementById('step5')
     };
 
     // ==========================================================================
@@ -544,7 +575,11 @@
         elements.btnApply.textContent = '✓ Applied';
         elements.btnApply.classList.add('success');
         elements.btnAB.classList.remove('hidden');
-        
+
+        // Enable profile saving
+        elements.btnSaveProfile.disabled = false;
+        elements.step5.classList.add('step-active');
+
       } catch (err) {
         console.error('Apply error:', err);
         showStatus(elements.applyStatus, `Error: ${err.message}`, 'error');
@@ -557,16 +592,176 @@
     // A/B COMPARISON
     // ==========================================================================
     let abState = true;  // true = correction on
-    
+
     elements.btnAB.addEventListener('click', async () => {
       abState = !abState;
-      
+
       if (abState) {
         await callService('set_room_correction_enabled', { enabled: true });
         elements.btnAB.textContent = 'A/B: Correction ON';
       } else {
         await callService('set_room_correction_enabled', { enabled: false });
         elements.btnAB.textContent = 'A/B: Correction OFF';
+      }
+    });
+
+    // ==========================================================================
+    // STEP 5: PROFILE MANAGEMENT
+    // ==========================================================================
+
+    // Load available profiles on page load
+    async function loadAvailableProfiles() {
+      try {
+        // In a real implementation, this would fetch from HA entity
+        // For now, we'll use localStorage as a fallback
+        const saved = localStorage.getItem('calibration_profiles');
+        const profiles = saved ? JSON.parse(saved) : [];
+
+        elements.profileSelect.innerHTML = '<option value="">-- Select a profile --</option>';
+
+        profiles.forEach(name => {
+          const option = document.createElement('option');
+          option.value = name;
+          option.textContent = name;
+          elements.profileSelect.appendChild(option);
+        });
+
+        if (profiles.length > 0) {
+          elements.btnLoadProfile.disabled = false;
+        }
+      } catch (err) {
+        console.error('Error loading profiles:', err);
+      }
+    }
+
+    // Save profile
+    elements.btnSaveProfile.addEventListener('click', async () => {
+      const profileName = elements.profileName.value.trim();
+
+      if (!profileName) {
+        showStatus(elements.profileStatus, 'Please enter a profile name', 'error');
+        return;
+      }
+
+      try {
+        elements.btnSaveProfile.disabled = true;
+        showStatus(elements.profileStatus, 'Saving profile...', 'info');
+
+        // Call save_profile service
+        await callService('save_profile', {
+          profile_name: profileName
+        });
+
+        // Save to local list for UI
+        const saved = localStorage.getItem('calibration_profiles');
+        const profiles = saved ? JSON.parse(saved) : [];
+        if (!profiles.includes(profileName)) {
+          profiles.push(profileName);
+          localStorage.setItem('calibration_profiles', JSON.stringify(profiles));
+        }
+
+        await loadAvailableProfiles();
+
+        showStatus(elements.profileStatus, `Profile "${profileName}" saved!`, 'success');
+        elements.btnSetActive.classList.remove('hidden');
+        elements.btnSaveProfile.disabled = false;
+
+      } catch (err) {
+        console.error('Save profile error:', err);
+        showStatus(elements.profileStatus, `Error: ${err.message}`, 'error');
+        elements.btnSaveProfile.disabled = false;
+      }
+    });
+
+    // Set as active profile (loads on boot)
+    elements.btnSetActive.addEventListener('click', async () => {
+      const profileName = elements.profileName.value.trim();
+
+      if (!profileName) {
+        showStatus(elements.profileStatus, 'Please enter a profile name', 'error');
+        return;
+      }
+
+      try {
+        showStatus(elements.profileStatus, 'Setting as active...', 'info');
+
+        await callService('set_active_profile', {
+          profile_name: profileName
+        });
+
+        showStatus(elements.profileStatus, `"${profileName}" will load on boot!`, 'success');
+
+      } catch (err) {
+        console.error('Set active error:', err);
+        showStatus(elements.profileStatus, `Error: ${err.message}`, 'error');
+      }
+    });
+
+    // Enable load/delete buttons when profile selected
+    elements.profileSelect.addEventListener('change', () => {
+      const hasSelection = elements.profileSelect.value !== '';
+      elements.btnLoadProfile.disabled = !hasSelection;
+      elements.btnDeleteProfile.disabled = !hasSelection;
+    });
+
+    // Load profile
+    elements.btnLoadProfile.addEventListener('click', async () => {
+      const profileName = elements.profileSelect.value;
+
+      if (!profileName) return;
+
+      try {
+        elements.btnLoadProfile.disabled = true;
+        showStatus(elements.profileStatus, `Loading "${profileName}"...`, 'info');
+
+        await callService('load_profile', {
+          profile_name: profileName
+        });
+
+        showStatus(elements.profileStatus, `Profile "${profileName}" loaded and applied!`, 'success');
+        elements.btnLoadProfile.disabled = false;
+
+      } catch (err) {
+        console.error('Load profile error:', err);
+        showStatus(elements.profileStatus, `Error: ${err.message}`, 'error');
+        elements.btnLoadProfile.disabled = false;
+      }
+    });
+
+    // Delete profile
+    elements.btnDeleteProfile.addEventListener('click', async () => {
+      const profileName = elements.profileSelect.value;
+
+      if (!profileName) return;
+
+      if (!confirm(`Delete profile "${profileName}"? This cannot be undone.`)) {
+        return;
+      }
+
+      try {
+        elements.btnDeleteProfile.disabled = true;
+        showStatus(elements.profileStatus, `Deleting "${profileName}"...`, 'info');
+
+        await callService('delete_profile', {
+          profile_name: profileName
+        });
+
+        // Remove from local list
+        const saved = localStorage.getItem('calibration_profiles');
+        const profiles = saved ? JSON.parse(saved) : [];
+        const filtered = profiles.filter(name => name !== profileName);
+        localStorage.setItem('calibration_profiles', JSON.stringify(filtered));
+
+        await loadAvailableProfiles();
+
+        showStatus(elements.profileStatus, `Profile "${profileName}" deleted`, 'success');
+        elements.btnDeleteProfile.disabled = false;
+        elements.profileSelect.value = '';
+
+      } catch (err) {
+        console.error('Delete profile error:', err);
+        showStatus(elements.profileStatus, `Error: ${err.message}`, 'error');
+        elements.btnDeleteProfile.disabled = false;
       }
     });
 
@@ -1077,13 +1272,16 @@
         alert('Your browser does not support Web Audio API. Please use Chrome, Safari, or Firefox.');
         return;
       }
-      
+
       // Check for getUserMedia support
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         alert('Your browser does not support microphone access. Please use Chrome, Safari, or Firefox.');
         return;
       }
-      
+
+      // Load available profiles
+      loadAvailableProfiles();
+
       console.log('Room calibration page loaded');
     });
   </script>

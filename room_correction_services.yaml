@@ -15,6 +15,16 @@
 esphome:
   includes:
     - tas5805m_biquad_i2c.h
+    - tas5805m_profile_manager.h
+  on_boot:
+    priority: -100  # Run after other components initialize
+    then:
+      - lambda: |-
+          // Initialize profile manager and load active profile
+          id(profile_manager).setup();
+
+          // Auto-load active profile if one is set
+          id(profile_manager).load_and_apply_active_profile(id(i2c_bus), 0x2C);
 
 # Enable web server for calibration UI
 web_server:
@@ -31,6 +41,17 @@ globals:
   - id: test_tone_frequency
     type: float
     initial_value: '1000.0'
+
+  # Shadow state for current biquad configuration
+  # Used to capture current state when saving profiles
+  - id: current_profile_shadow
+    type: tas5805m_profile::CalibrationProfile
+    restore_value: no
+
+  # Global profile manager instance
+  - id: profile_manager
+    type: tas5805m_profile::ProfileManager
+    restore_value: no
 
 # =============================================================================
 # HOME ASSISTANT SERVICES
@@ -63,6 +84,13 @@ api:
 
             if (success) {
                 ESP_LOGI("room_cal", "Biquad %d written successfully", index);
+
+                // Update shadow state
+                tas5805m_profile::add_filter_to_profile(
+                    id(current_profile_shadow),
+                    channel, index,
+                    b0, b1, b2, a1, a2
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to write biquad %d", index);
             }
@@ -260,8 +288,121 @@ api:
 
             if (success) {
                 ESP_LOGI("room_cal", "All biquads reset to bypass - flat response");
+                // Clear shadow state
+                id(current_profile_shadow) = tas5805m_profile::CalibrationProfile();
             } else {
                 ESP_LOGE("room_cal", "Failed to reset some biquads");
+            }
+
+    # =========================================================================
+    # PROFILE MANAGEMENT
+    # =========================================================================
+
+    # Save current biquad configuration as a named profile
+    - service: save_profile
+      variables:
+        profile_name: string
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "Saving profile: %s", profile_name.c_str());
+
+            bool success = id(profile_manager).save_profile(
+                profile_name,
+                id(current_profile_shadow)
+            );
+
+            if (success) {
+                ESP_LOGI("room_cal", "Profile '%s' saved successfully", profile_name.c_str());
+            } else {
+                ESP_LOGE("room_cal", "Failed to save profile '%s'", profile_name.c_str());
+            }
+
+    # Load and apply a saved profile
+    - service: load_profile
+      variables:
+        profile_name: string
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "Loading profile: %s", profile_name.c_str());
+
+            tas5805m_profile::CalibrationProfile profile;
+            if (!id(profile_manager).load_profile(profile_name, profile)) {
+                ESP_LOGE("room_cal", "Failed to load profile '%s'", profile_name.c_str());
+                return;
+            }
+
+            // Apply all filters
+            bool success = true;
+            for (int i = 0; i < 15; i++) {
+                // Left channel
+                auto& lc = profile.left_channel[i];
+                if (!tas5805m_biquad::write_biquad(id(i2c_bus), 0x2C, 0, i,
+                                                   lc.b0, lc.b1, lc.b2, lc.a1, lc.a2)) {
+                    success = false;
+                }
+
+                // Right channel
+                auto& rc = profile.right_channel[i];
+                if (!tas5805m_biquad::write_biquad(id(i2c_bus), 0x2C, 1, i,
+                                                   rc.b0, rc.b1, rc.b2, rc.a1, rc.a2)) {
+                    success = false;
+                }
+
+                delay(2);  // Small delay between writes
+            }
+
+            if (success) {
+                ESP_LOGI("room_cal", "Profile '%s' loaded and applied", profile_name.c_str());
+                // Update shadow state
+                id(current_profile_shadow) = profile;
+            } else {
+                ESP_LOGE("room_cal", "Errors occurred while applying profile '%s'", profile_name.c_str());
+            }
+
+    # Delete a saved profile
+    - service: delete_profile
+      variables:
+        profile_name: string
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "Deleting profile: %s", profile_name.c_str());
+
+            bool success = id(profile_manager).delete_profile(profile_name);
+
+            if (success) {
+                ESP_LOGI("room_cal", "Profile '%s' deleted", profile_name.c_str());
+            } else {
+                ESP_LOGE("room_cal", "Failed to delete profile '%s'", profile_name.c_str());
+            }
+
+    # Set a profile as the active profile (loads on boot)
+    - service: set_active_profile
+      variables:
+        profile_name: string
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "Setting active profile: %s", profile_name.c_str());
+
+            bool success = id(profile_manager).set_active_profile(profile_name);
+
+            if (success) {
+                ESP_LOGI("room_cal", "Active profile set to '%s'", profile_name.c_str());
+            } else {
+                ESP_LOGE("room_cal", "Failed to set active profile to '%s'", profile_name.c_str());
+            }
+
+    # Clear the active profile (no profile loaded on boot)
+    - service: clear_active_profile
+      then:
+        - lambda: |-
+            ESP_LOGI("room_cal", "Clearing active profile");
+
+            bool success = id(profile_manager).set_active_profile(-1);
+
+            if (success) {
+                ESP_LOGI("room_cal", "Active profile cleared");
+            } else {
+                ESP_LOGE("room_cal", "Failed to clear active profile");
             }
 
 # =============================================================================
@@ -303,4 +444,23 @@ text_sensor:
   - platform: template
     name: "Active Calibration Profile"
     id: active_cal_profile
-    lambda: return std::string("default");
+    update_interval: 10s
+    lambda: |-
+      return id(profile_manager).get_active_profile_name();
+
+  - platform: template
+    name: "Available Profiles"
+    id: available_profiles
+    update_interval: 30s
+    lambda: |-
+      auto profiles = id(profile_manager).list_profiles();
+      if (profiles.empty()) {
+        return std::string("none");
+      }
+
+      std::string result = "";
+      for (size_t i = 0; i < profiles.size(); i++) {
+        if (i > 0) result += ", ";
+        result += profiles[i];
+      }
+      return result;
