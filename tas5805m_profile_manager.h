@@ -470,4 +470,20 @@ inline void add_filter_to_profile(CalibrationProfile& profile,
     }
 }
 
+// =============================================================================
+// GLOBAL INSTANCES
+// =============================================================================
+// These are defined here (not as ESPHome globals) to ensure proper
+// initialization order with ESPHome's code generation.
+
+// Shadow copy of current biquad state - used when saving profiles
+static CalibrationProfile g_current_profile_shadow;
+
+// Profile manager instance
+static ProfileManager g_profile_manager;
+
+// Accessor functions for ESPHome lambdas
+inline CalibrationProfile& current_profile_shadow() { return g_current_profile_shadow; }
+inline ProfileManager& profile_manager() { return g_profile_manager; }
+
 }  // namespace tas5805m_profile

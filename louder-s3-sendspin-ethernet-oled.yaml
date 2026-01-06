@@ -21,6 +21,10 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2025.12.0
+  # Includes must be in main config (not package) for correct code generation order
+  includes:
+    - tas5805m_biquad_i2c.h
+    - tas5805m_profile_manager.h
   platformio_options:
     board_build.flash_mode: dio
   on_boot:
@@ -31,6 +35,7 @@ esphome:
           media_url: file://startup_sync_sound
 
 esp32:
+  board: esp32-s3-devkitc-1
   variant: ESP32S3
   flash_size: 16MB
   cpu_frequency: 240MHz
@@ -38,6 +43,10 @@ esp32:
     type: esp-idf
     version: recommended
     sdkconfig_options:
+      # PSRAM configuration for N8R8 (8MB octal PSRAM)
+      CONFIG_SPIRAM: "y"
+      CONFIG_SPIRAM_MODE_OCT: "y"
+      CONFIG_SPIRAM_SPEED_80M: "y"
       CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
       CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
@@ -73,11 +82,10 @@ ota:
 http_request:
 
 # =============================================================================
-# NETWORKING - W5500 Ethernet (replaces WiFi for reliability)
+# NETWORKING - W5500 Ethernet
 # =============================================================================
-# Pinout for Louder-ESP32S3:
-#   CS=10, MOSI=11, CLK=12, MISO=13, INT=6, RST=5
-
+# Note: W5500 manages its own SPI internally in ESPHome 2025.12+
+# OLED display disabled until SPI bus sharing is resolved
 ethernet:
   type: W5500
   clk_pin: GPIO12
@@ -86,15 +94,6 @@ ethernet:
   cs_pin: GPIO10
   interrupt_pin: GPIO6
   reset_pin: GPIO5
-
-# =============================================================================
-# SPI BUS - Shared by Ethernet and OLED
-# =============================================================================
-spi:
-  clk_pin: GPIO12
-  mosi_pin: GPIO11
-  miso_pin: GPIO13
-  interface: spi3
 
 # =============================================================================
 # I2C BUS - TAS5805M DAC
@@ -298,22 +297,19 @@ text_sensor:
     id: track_title
     type: title
     name: Track Title
-    on_value:
-      - component.update: oled_display
+    # on_value: component.update: oled_display  # OLED disabled
 
   - platform: sendspin
     id: track_artist
     type: artist
     name: Artist
-    on_value:
-      - component.update: oled_display
+    # on_value: component.update: oled_display  # OLED disabled
 
   - platform: sendspin
     id: album_title
     type: album
     name: Album
-    on_value:
-      - component.update: oled_display
+    # on_value: component.update: oled_display  # OLED disabled
 
   - platform: sendspin
     id: album_year
@@ -328,98 +324,12 @@ text_sensor:
 # =============================================================================
 # Pinout for Louder-ESP32S3:
 #   CS=47, DC=38, RST=48, MOSI/CLK shared with Ethernet
-
-font:
-  # Main title font
-  - file: "gfonts://Roboto@500"
-    id: font_title
-    size: 16
-    glyphs: " !\"%()+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\xB0\xA3\u20AC\xA5\xA2\xA4'"
-
-  # Artist/album font
-  - file: "gfonts://Roboto"
-    id: font_body
-    size: 12
-    glyphs: " !\"%()+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\xB0\xA3\u20AC\xA5\xA2\xA4'"
-
-  # Small info font
-  - file: "gfonts://Roboto"
-    id: font_small
-    size: 10
-    glyphs: " !\"%()+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\xB0\xA3\u20AC\xA5\xA2\xA4'"
-
-  # Material Design Icons
-  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
-    id: font_icons
-    size: 20
-    glyphs:
-      - "\U000F040A"  # play
-      - "\U000F03E4"  # pause
-      - "\U000F04DB"  # stop
-      - "\U000F057E"  # volume-high
-      - "\U000F0580"  # volume-mute
-      - "\U000F075F"  # music-note
-
-display:
-  - platform: ssd1306_spi
-    id: oled_display
-    model: "SSD1306 128x64"  # Change to "SH1106 128x64" if display looks offset
-    cs_pin: GPIO47
-    dc_pin: GPIO38
-    reset_pin: GPIO48
-    rotation: 0
-    update_interval: 5s  # Also updates on track change via text_sensor triggers
-    lambda: |-
-      // Get current state
-      auto state = id(external_media_player).state;
-      bool is_playing = (state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING);
-      bool is_paused = (state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PAUSED);
-      bool is_idle = (state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_IDLE);
-      
-      // Draw status icon
-      if (is_playing) {
-        it.printf(0, 0, id(font_icons), "\U000F040A");  // Play icon
-      } else if (is_paused) {
-        it.printf(0, 0, id(font_icons), "\U000F03E4");  // Pause icon
-      } else {
-        it.printf(0, 0, id(font_icons), "\U000F075F");  // Music note (idle)
-      }
-      
-      // Draw friendly name (top right)
-      it.printf(127, 2, id(font_small), TextAlign::TOP_RIGHT, "${friendly_name}");
-      
-      // Horizontal line separator
-      it.line(0, 22, 127, 22);
-      
-      if (is_idle || (id(track_title).state.empty() && id(track_artist).state.empty())) {
-        // Idle state - show ready message
-        it.printf(64, 38, id(font_body), TextAlign::CENTER, "Ready for music");
-        it.printf(64, 52, id(font_small), TextAlign::CENTER, "via Sendspin");
-      } else {
-        // Now playing info
-        // Track title (truncate if too long)
-        std::string title = id(track_title).state;
-        if (title.length() > 20) {
-          title = title.substr(0, 18) + "...";
-        }
-        it.printf(0, 26, id(font_title), "%s", title.c_str());
-        
-        // Artist
-        std::string artist = id(track_artist).state;
-        if (artist.length() > 24) {
-          artist = artist.substr(0, 22) + "...";
-        }
-        it.printf(0, 44, id(font_body), "%s", artist.c_str());
-        
-        // Album (if space permits)
-        std::string album = id(album_title).state;
-        if (!album.empty()) {
-          if (album.length() > 26) {
-            album = album.substr(0, 24) + "...";
-          }
-          it.printf(0, 56, id(font_small), "%s", album.c_str());
-        }
-      }
+#
+# TODO: OLED display disabled - W5500 manages SPI internally in ESPHome 2025.12+
+#       and cannot share with SPI display. Options to re-enable:
+#       1. Use I2C OLED (ssd1306_i2c) if hardware supports it
+#       2. Wait for ESPHome to add spi_id support to W5500
+#       3. Use software SPI for OLED on different pins
 
 # =============================================================================
 # TAS5805M SENSORS & CONTROLS

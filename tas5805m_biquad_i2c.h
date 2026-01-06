@@ -30,6 +30,113 @@ constexpr uint8_t REG_BOOK_SELECT = 0x7F;
 // Biquad coefficient book
 constexpr uint8_t BOOK_COEFF = 0xAA;
 
+// =============================================================================
+// VALIDATION HELPERS
+// =============================================================================
+
+/**
+ * Validate channel parameter
+ * @param channel 0=left, 1=right, 2=both
+ * @return true if valid
+ */
+inline bool validate_channel(int channel) {
+    if (channel < 0 || channel > 2) {
+        ESP_LOGE("tas5805m_bq", "Invalid channel: %d (must be 0-2)", channel);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate biquad index parameter
+ * @param index 0-14
+ * @return true if valid
+ */
+inline bool validate_index(int index) {
+    if (index < 0 || index >= 15) {
+        ESP_LOGE("tas5805m_bq", "Invalid biquad index: %d (must be 0-14)", index);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate frequency parameter
+ * @param frequency in Hz
+ * @param min_freq minimum allowed frequency (default 10 Hz)
+ * @param max_freq maximum allowed frequency (default 24000 Hz)
+ * @return true if valid
+ */
+inline bool validate_frequency(float frequency, float min_freq = 10.0f, float max_freq = 24000.0f) {
+    if (!std::isfinite(frequency) || frequency < min_freq || frequency > max_freq) {
+        ESP_LOGE("tas5805m_bq", "Invalid frequency: %.1f (must be %.0f-%.0f Hz)", frequency, min_freq, max_freq);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate gain parameter
+ * @param gain_db in dB
+ * @param min_gain minimum allowed gain (default -20 dB)
+ * @param max_gain maximum allowed gain (default +20 dB)
+ * @return true if valid
+ */
+inline bool validate_gain(float gain_db, float min_gain = -20.0f, float max_gain = 20.0f) {
+    if (!std::isfinite(gain_db) || gain_db < min_gain || gain_db > max_gain) {
+        ESP_LOGE("tas5805m_bq", "Invalid gain: %.1f (must be %.0f to +%.0f dB)", gain_db, min_gain, max_gain);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate Q factor parameter
+ * @param q Q factor
+ * @param min_q minimum allowed Q (default 0.1)
+ * @param max_q maximum allowed Q (default 20)
+ * @return true if valid
+ */
+inline bool validate_q(float q, float min_q = 0.1f, float max_q = 20.0f) {
+    if (!std::isfinite(q) || q < min_q || q > max_q) {
+        ESP_LOGE("tas5805m_bq", "Invalid Q: %.2f (must be %.1f-%.0f)", q, min_q, max_q);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate slope parameter (for shelf filters)
+ * @param slope shelf slope
+ * @param min_slope minimum allowed slope (default 0.1)
+ * @param max_slope maximum allowed slope (default 5.0)
+ * @return true if valid
+ */
+inline bool validate_slope(float slope, float min_slope = 0.1f, float max_slope = 5.0f) {
+    if (!std::isfinite(slope) || slope < min_slope || slope > max_slope) {
+        ESP_LOGE("tas5805m_bq", "Invalid slope: %.2f (must be %.1f-%.1f)", slope, min_slope, max_slope);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate biquad coefficients
+ * @return true if all coefficients are finite
+ */
+inline bool validate_coefficients(float b0, float b1, float b2, float a1, float a2) {
+    if (!std::isfinite(b0) || !std::isfinite(b1) || !std::isfinite(b2) ||
+        !std::isfinite(a1) || !std::isfinite(a2)) {
+        ESP_LOGE("tas5805m_bq", "Coefficient contains NaN or Inf");
+        return false;
+    }
+    return true;
+}
+
+// =============================================================================
+// PAGE/OFFSET CONSTANTS
+// =============================================================================
+
 // Page addresses for left channel biquads (0-14)
 constexpr uint8_t PAGE_LEFT_BQ[15] = {
     0x24, 0x24, 0x24, 0x24,  // BQ0-BQ3
@@ -317,11 +424,12 @@ inline bool reset_all_biquads(esphome::i2c::I2CBus* bus, uint8_t address) {
 
 /**
  * Calculate and write a parametric EQ filter
+ * @param out_coeffs Optional array of 5 floats to receive calculated coefficients [b0,b1,b2,a1,a2]
  */
 inline bool write_parametric_eq(esphome::i2c::I2CBus* bus, uint8_t address,
                                 int channel, int index,
                                 float frequency, float gain_db, float q,
-                                float fs = 48000.0f) {
+                                float fs = 48000.0f, float* out_coeffs = nullptr) {
 
     const float A = std::pow(10.0f, gain_db / 40.0f);
     const float omega = 2.0f * M_PI * frequency / fs;
@@ -339,6 +447,15 @@ inline bool write_parametric_eq(esphome::i2c::I2CBus* bus, uint8_t address,
     // Normalize by a0
     b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
 
+    // Output coefficients if requested
+    if (out_coeffs != nullptr) {
+        out_coeffs[0] = b0;
+        out_coeffs[1] = b1;
+        out_coeffs[2] = b2;
+        out_coeffs[3] = a1;
+        out_coeffs[4] = a2;
+    }
+
     ESP_LOGI("tas5805m_bq", "PEQ: fc=%.1fHz gain=%.1fdB Q=%.2f", frequency, gain_db, q);
 
     return write_biquad(bus, address, channel, index, b0, b1, b2, a1, a2);
@@ -346,11 +463,12 @@ inline bool write_parametric_eq(esphome::i2c::I2CBus* bus, uint8_t address,
 
 /**
  * Calculate and write a low shelf filter
+ * @param out_coeffs Optional array of 5 floats to receive calculated coefficients [b0,b1,b2,a1,a2]
  */
 inline bool write_low_shelf(esphome::i2c::I2CBus* bus, uint8_t address,
                             int channel, int index,
                             float frequency, float gain_db, float slope = 1.0f,
-                            float fs = 48000.0f) {
+                            float fs = 48000.0f, float* out_coeffs = nullptr) {
 
     const float A = std::pow(10.0f, gain_db / 40.0f);
     const float omega = 2.0f * M_PI * frequency / fs;
@@ -368,6 +486,15 @@ inline bool write_low_shelf(esphome::i2c::I2CBus* bus, uint8_t address,
 
     b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
 
+    // Output coefficients if requested
+    if (out_coeffs != nullptr) {
+        out_coeffs[0] = b0;
+        out_coeffs[1] = b1;
+        out_coeffs[2] = b2;
+        out_coeffs[3] = a1;
+        out_coeffs[4] = a2;
+    }
+
     ESP_LOGI("tas5805m_bq", "Low shelf: fc=%.1fHz gain=%.1fdB slope=%.2f", frequency, gain_db, slope);
 
     return write_biquad(bus, address, channel, index, b0, b1, b2, a1, a2);
@@ -375,11 +502,12 @@ inline bool write_low_shelf(esphome::i2c::I2CBus* bus, uint8_t address,
 
 /**
  * Calculate and write a high shelf filter
+ * @param out_coeffs Optional array of 5 floats to receive calculated coefficients [b0,b1,b2,a1,a2]
  */
 inline bool write_high_shelf(esphome::i2c::I2CBus* bus, uint8_t address,
                              int channel, int index,
                              float frequency, float gain_db, float slope = 1.0f,
-                             float fs = 48000.0f) {
+                             float fs = 48000.0f, float* out_coeffs = nullptr) {
 
     const float A = std::pow(10.0f, gain_db / 40.0f);
     const float omega = 2.0f * M_PI * frequency / fs;
@@ -397,6 +525,15 @@ inline bool write_high_shelf(esphome::i2c::I2CBus* bus, uint8_t address,
 
     b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
 
+    // Output coefficients if requested
+    if (out_coeffs != nullptr) {
+        out_coeffs[0] = b0;
+        out_coeffs[1] = b1;
+        out_coeffs[2] = b2;
+        out_coeffs[3] = a1;
+        out_coeffs[4] = a2;
+    }
+
     ESP_LOGI("tas5805m_bq", "High shelf: fc=%.1fHz gain=%.1fdB slope=%.2f", frequency, gain_db, slope);
 
     return write_biquad(bus, address, channel, index, b0, b1, b2, a1, a2);
@@ -404,11 +541,12 @@ inline bool write_high_shelf(esphome::i2c::I2CBus* bus, uint8_t address,
 
 /**
  * Calculate and write a high-pass filter
+ * @param out_coeffs Optional array of 5 floats to receive calculated coefficients [b0,b1,b2,a1,a2]
  */
 inline bool write_highpass(esphome::i2c::I2CBus* bus, uint8_t address,
                            int channel, int index,
                            float frequency, float q,
-                           float fs = 48000.0f) {
+                           float fs = 48000.0f, float* out_coeffs = nullptr) {
 
     const float omega = 2.0f * M_PI * frequency / fs;
     const float sin_omega = std::sin(omega);
@@ -424,6 +562,15 @@ inline bool write_highpass(esphome::i2c::I2CBus* bus, uint8_t address,
 
     b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
 
+    // Output coefficients if requested
+    if (out_coeffs != nullptr) {
+        out_coeffs[0] = b0;
+        out_coeffs[1] = b1;
+        out_coeffs[2] = b2;
+        out_coeffs[3] = a1;
+        out_coeffs[4] = a2;
+    }
+
     ESP_LOGI("tas5805m_bq", "High-pass: fc=%.1fHz Q=%.2f", frequency, q);
 
     return write_biquad(bus, address, channel, index, b0, b1, b2, a1, a2);
@@ -431,11 +578,12 @@ inline bool write_highpass(esphome::i2c::I2CBus* bus, uint8_t address,
 
 /**
  * Calculate and write a low-pass filter
+ * @param out_coeffs Optional array of 5 floats to receive calculated coefficients [b0,b1,b2,a1,a2]
  */
 inline bool write_lowpass(esphome::i2c::I2CBus* bus, uint8_t address,
                           int channel, int index,
                           float frequency, float q,
-                          float fs = 48000.0f) {
+                          float fs = 48000.0f, float* out_coeffs = nullptr) {
 
     const float omega = 2.0f * M_PI * frequency / fs;
     const float sin_omega = std::sin(omega);
@@ -451,6 +599,15 @@ inline bool write_lowpass(esphome::i2c::I2CBus* bus, uint8_t address,
 
     b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
 
+    // Output coefficients if requested
+    if (out_coeffs != nullptr) {
+        out_coeffs[0] = b0;
+        out_coeffs[1] = b1;
+        out_coeffs[2] = b2;
+        out_coeffs[3] = a1;
+        out_coeffs[4] = a2;
+    }
+
     ESP_LOGI("tas5805m_bq", "Low-pass: fc=%.1fHz Q=%.2f", frequency, q);
 
     return write_biquad(bus, address, channel, index, b0, b1, b2, a1, a2);
@@ -458,11 +615,12 @@ inline bool write_lowpass(esphome::i2c::I2CBus* bus, uint8_t address,
 
 /**
  * Calculate and write a notch filter
+ * @param out_coeffs Optional array of 5 floats to receive calculated coefficients [b0,b1,b2,a1,a2]
  */
 inline bool write_notch(esphome::i2c::I2CBus* bus, uint8_t address,
                         int channel, int index,
                         float frequency, float q,
-                        float fs = 48000.0f) {
+                        float fs = 48000.0f, float* out_coeffs = nullptr) {
 
     const float omega = 2.0f * M_PI * frequency / fs;
     const float sin_omega = std::sin(omega);
@@ -477,6 +635,15 @@ inline bool write_notch(esphome::i2c::I2CBus* bus, uint8_t address,
     float a2 = 1.0f - alpha;
 
     b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+
+    // Output coefficients if requested
+    if (out_coeffs != nullptr) {
+        out_coeffs[0] = b0;
+        out_coeffs[1] = b1;
+        out_coeffs[2] = b2;
+        out_coeffs[3] = a1;
+        out_coeffs[4] = a2;
+    }
 
     ESP_LOGI("tas5805m_bq", "Notch: fc=%.1fHz Q=%.2f", frequency, q);
 

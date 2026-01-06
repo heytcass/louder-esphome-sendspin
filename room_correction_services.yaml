@@ -13,18 +13,16 @@
 # =============================================================================
 
 esphome:
-  includes:
-    - tas5805m_biquad_i2c.h
-    - tas5805m_profile_manager.h
+  # Note: includes moved to main YAML for correct code generation order
   on_boot:
     priority: -100  # Run after other components initialize
     then:
       - lambda: |-
           // Initialize profile manager and load active profile
-          id(profile_manager).setup();
+          tas5805m_profile::profile_manager().setup();
 
           // Auto-load active profile if one is set
-          id(profile_manager).load_and_apply_active_profile(id(i2c_bus), 0x2C);
+          tas5805m_profile::profile_manager().load_and_apply_active_profile(id(i2c_bus), id(tas5805m_addr));
 
 # Enable web server for calibration UI
 web_server:
@@ -38,20 +36,14 @@ globals:
     type: bool
     initial_value: 'false'
 
-  - id: test_tone_frequency
-    type: float
-    initial_value: '1000.0'
+  # TAS5805M I2C address - change if using non-default address
+  - id: tas5805m_addr
+    type: uint8_t
+    initial_value: '0x2C'
 
-  # Shadow state for current biquad configuration
-  # Used to capture current state when saving profiles
-  - id: current_profile_shadow
-    type: tas5805m_profile::CalibrationProfile
-    restore_value: no
-
-  # Global profile manager instance
-  - id: profile_manager
-    type: tas5805m_profile::ProfileManager
-    restore_value: no
+  # Note: profile_manager and current_profile_shadow are defined as static
+  # globals in tas5805m_profile_manager.h to avoid ESPHome code generation
+  # order issues with custom types
 
 # =============================================================================
 # HOME ASSISTANT SERVICES
@@ -73,26 +65,16 @@ api:
         a2: float
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d (must be 0-2)", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid biquad index: %d (must be 0-14)", index);
-                return;
-            }
-            if (!std::isfinite(b0) || !std::isfinite(b1) || !std::isfinite(b2) ||
-                !std::isfinite(a1) || !std::isfinite(a2)) {
-                ESP_LOGE("room_cal", "Coefficient contains NaN or Inf");
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_coefficients(b0, b1, b2, a1, a2)) return;
 
             ESP_LOGI("room_cal", "set_biquad: ch=%d idx=%d", channel, index);
             ESP_LOGI("room_cal", "  b0=%.6f b1=%.6f b2=%.6f a1=%.6f a2=%.6f", b0, b1, b2, a1, a2);
 
             bool success = tas5805m_biquad::write_biquad(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
                 b0, b1, b2, a1, a2
             );
@@ -102,7 +84,7 @@ api:
 
                 // Update shadow state
                 tas5805m_profile::add_filter_to_profile(
-                    id(current_profile_shadow),
+                    tas5805m_profile::current_profile_shadow(),
                     channel, index,
                     b0, b1, b2, a1, a2
                 );
@@ -122,53 +104,24 @@ api:
         q: float          # Q factor (0.5 to 10)
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d (must be 0-2)", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid biquad index: %d (must be 0-14)", index);
-                return;
-            }
-            if (frequency < 10 || frequency > 24000) {
-                ESP_LOGE("room_cal", "Invalid frequency: %.1f (must be 10-24000 Hz)", frequency);
-                return;
-            }
-            if (!std::isfinite(gain_db) || gain_db < -20 || gain_db > 20) {
-                ESP_LOGE("room_cal", "Invalid gain: %.1f (must be -20 to +20 dB)", gain_db);
-                return;
-            }
-            if (q < 0.1 || q > 20) {
-                ESP_LOGE("room_cal", "Invalid Q: %.2f (must be 0.1-20)", q);
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_frequency(frequency)) return;
+            if (!tas5805m_biquad::validate_gain(gain_db)) return;
+            if (!tas5805m_biquad::validate_q(q)) return;
 
             ESP_LOGI("room_cal", "set_parametric_eq: ch=%d idx=%d fc=%.1fHz gain=%.1fdB Q=%.2f",
                      channel, index, frequency, gain_db, q);
 
-            // Calculate coefficients for shadow state (using same formula as C++ code)
-            const float fs = 48000.0f;
-            const float A = std::pow(10.0f, gain_db / 40.0f);
-            const float omega = 2.0f * M_PI * frequency / fs;
-            const float sin_omega = std::sin(omega);
-            const float cos_omega = std::cos(omega);
-            const float alpha = sin_omega / (2.0f * q);
-
-            float b0 = 1.0f + alpha * A;
-            float b1 = -2.0f * cos_omega;
-            float b2 = 1.0f - alpha * A;
-            float a0 = 1.0f + alpha / A;
-            float a1 = -2.0f * cos_omega;
-            float a2 = 1.0f - alpha / A;
-
-            // Normalize by a0
-            b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+            // Array to receive calculated coefficients
+            float coeffs[5];
 
             bool success = tas5805m_biquad::write_parametric_eq(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
-                frequency, gain_db, q
+                frequency, gain_db, q,
+                48000.0f, coeffs
             );
 
             if (success) {
@@ -176,9 +129,9 @@ api:
 
                 // Update shadow state with calculated coefficients
                 tas5805m_profile::add_filter_to_profile(
-                    id(current_profile_shadow),
+                    tas5805m_profile::current_profile_shadow(),
                     channel, index,
-                    b0, b1, b2, a1, a2
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
                 );
             } else {
                 ESP_LOGE("room_cal", "Failed to write parametric EQ");
@@ -196,39 +149,35 @@ api:
         slope: float      # Slope (0.5 to 2.0, 1.0 = 6dB/oct)
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid index: %d", index);
-                return;
-            }
-            if (frequency < 10 || frequency > 24000) {
-                ESP_LOGE("room_cal", "Invalid frequency: %.1f", frequency);
-                return;
-            }
-            if (!std::isfinite(gain_db) || gain_db < -20 || gain_db > 20) {
-                ESP_LOGE("room_cal", "Invalid gain: %.1f", gain_db);
-                return;
-            }
-            if (slope < 0.1 || slope > 5.0) {
-                ESP_LOGE("room_cal", "Invalid slope: %.2f", slope);
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_frequency(frequency)) return;
+            if (!tas5805m_biquad::validate_gain(gain_db)) return;
+            if (!tas5805m_biquad::validate_slope(slope)) return;
 
             ESP_LOGI("room_cal", "set_low_shelf: ch=%d idx=%d fc=%.1fHz gain=%.1fdB slope=%.2f",
                      channel, index, frequency, gain_db, slope);
 
+            // Array to receive calculated coefficients
+            float coeffs[5];
+
             bool success = tas5805m_biquad::write_low_shelf(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
-                frequency, gain_db, slope
+                frequency, gain_db, slope,
+                48000.0f, coeffs
             );
 
             if (success) {
                 ESP_LOGI("room_cal", "Low shelf written successfully");
+
+                // Update shadow state with calculated coefficients
+                tas5805m_profile::add_filter_to_profile(
+                    tas5805m_profile::current_profile_shadow(),
+                    channel, index,
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to write low shelf");
             }
@@ -245,39 +194,35 @@ api:
         slope: float
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid index: %d", index);
-                return;
-            }
-            if (frequency < 10 || frequency > 24000) {
-                ESP_LOGE("room_cal", "Invalid frequency: %.1f", frequency);
-                return;
-            }
-            if (!std::isfinite(gain_db) || gain_db < -20 || gain_db > 20) {
-                ESP_LOGE("room_cal", "Invalid gain: %.1f", gain_db);
-                return;
-            }
-            if (slope < 0.1 || slope > 5.0) {
-                ESP_LOGE("room_cal", "Invalid slope: %.2f", slope);
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_frequency(frequency)) return;
+            if (!tas5805m_biquad::validate_gain(gain_db)) return;
+            if (!tas5805m_biquad::validate_slope(slope)) return;
 
             ESP_LOGI("room_cal", "set_high_shelf: ch=%d idx=%d fc=%.1fHz gain=%.1fdB slope=%.2f",
                      channel, index, frequency, gain_db, slope);
 
+            // Array to receive calculated coefficients
+            float coeffs[5];
+
             bool success = tas5805m_biquad::write_high_shelf(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
-                frequency, gain_db, slope
+                frequency, gain_db, slope,
+                48000.0f, coeffs
             );
 
             if (success) {
                 ESP_LOGI("room_cal", "High shelf written successfully");
+
+                // Update shadow state with calculated coefficients
+                tas5805m_profile::add_filter_to_profile(
+                    tas5805m_profile::current_profile_shadow(),
+                    channel, index,
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to write high shelf");
             }
@@ -293,35 +238,34 @@ api:
         q: float          # Q factor (0.707 = Butterworth)
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid index: %d", index);
-                return;
-            }
-            if (frequency < 5 || frequency > 24000) {
-                ESP_LOGE("room_cal", "Invalid frequency: %.1f", frequency);
-                return;
-            }
-            if (q < 0.1 || q > 20) {
-                ESP_LOGE("room_cal", "Invalid Q: %.2f", q);
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_frequency(frequency, 5.0f, 24000.0f)) return;
+            if (!tas5805m_biquad::validate_q(q)) return;
 
             ESP_LOGI("room_cal", "set_highpass: ch=%d idx=%d fc=%.1fHz Q=%.2f",
                      channel, index, frequency, q);
 
+            // Array to receive calculated coefficients
+            float coeffs[5];
+
             bool success = tas5805m_biquad::write_highpass(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
-                frequency, q
+                frequency, q,
+                48000.0f, coeffs
             );
 
             if (success) {
                 ESP_LOGI("room_cal", "High-pass written successfully");
+
+                // Update shadow state with calculated coefficients
+                tas5805m_profile::add_filter_to_profile(
+                    tas5805m_profile::current_profile_shadow(),
+                    channel, index,
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to write high-pass");
             }
@@ -337,35 +281,34 @@ api:
         q: float
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid index: %d", index);
-                return;
-            }
-            if (frequency < 10 || frequency > 24000) {
-                ESP_LOGE("room_cal", "Invalid frequency: %.1f", frequency);
-                return;
-            }
-            if (q < 0.1 || q > 20) {
-                ESP_LOGE("room_cal", "Invalid Q: %.2f", q);
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_frequency(frequency)) return;
+            if (!tas5805m_biquad::validate_q(q)) return;
 
             ESP_LOGI("room_cal", "set_lowpass: ch=%d idx=%d fc=%.1fHz Q=%.2f",
                      channel, index, frequency, q);
 
+            // Array to receive calculated coefficients
+            float coeffs[5];
+
             bool success = tas5805m_biquad::write_lowpass(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
-                frequency, q
+                frequency, q,
+                48000.0f, coeffs
             );
 
             if (success) {
                 ESP_LOGI("room_cal", "Low-pass written successfully");
+
+                // Update shadow state with calculated coefficients
+                tas5805m_profile::add_filter_to_profile(
+                    tas5805m_profile::current_profile_shadow(),
+                    channel, index,
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to write low-pass");
             }
@@ -381,35 +324,34 @@ api:
         q: float
       then:
         - lambda: |-
-            // Validate parameters
-            if (channel < 0 || channel > 2) {
-                ESP_LOGE("room_cal", "Invalid channel: %d", channel);
-                return;
-            }
-            if (index < 0 || index >= 15) {
-                ESP_LOGE("room_cal", "Invalid index: %d", index);
-                return;
-            }
-            if (frequency < 10 || frequency > 24000) {
-                ESP_LOGE("room_cal", "Invalid frequency: %.1f", frequency);
-                return;
-            }
-            if (q < 0.1 || q > 20) {
-                ESP_LOGE("room_cal", "Invalid Q: %.2f", q);
-                return;
-            }
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+            if (!tas5805m_biquad::validate_frequency(frequency)) return;
+            if (!tas5805m_biquad::validate_q(q)) return;
 
             ESP_LOGI("room_cal", "set_notch: ch=%d idx=%d fc=%.1fHz Q=%.2f",
                      channel, index, frequency, q);
 
+            // Array to receive calculated coefficients
+            float coeffs[5];
+
             bool success = tas5805m_biquad::write_notch(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index,
-                frequency, q
+                frequency, q,
+                48000.0f, coeffs
             );
 
             if (success) {
                 ESP_LOGI("room_cal", "Notch written successfully");
+
+                // Update shadow state with calculated coefficients
+                tas5805m_profile::add_filter_to_profile(
+                    tas5805m_profile::current_profile_shadow(),
+                    channel, index,
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to write notch");
             }
@@ -423,15 +365,26 @@ api:
         index: int
       then:
         - lambda: |-
+            // Validate parameters using helper functions
+            if (!tas5805m_biquad::validate_channel(channel)) return;
+            if (!tas5805m_biquad::validate_index(index)) return;
+
             ESP_LOGI("room_cal", "reset_biquad: ch=%d idx=%d", channel, index);
 
             bool success = tas5805m_biquad::reset_biquad(
-                id(i2c_bus), 0x2C,
+                id(i2c_bus), id(tas5805m_addr),
                 channel, index
             );
 
             if (success) {
                 ESP_LOGI("room_cal", "Biquad %d reset to bypass", index);
+
+                // Update shadow state with bypass coefficients
+                tas5805m_profile::add_filter_to_profile(
+                    tas5805m_profile::current_profile_shadow(),
+                    channel, index,
+                    1.0f, 0.0f, 0.0f, 0.0f, 0.0f
+                );
             } else {
                 ESP_LOGE("room_cal", "Failed to reset biquad %d", index);
             }
@@ -444,12 +397,12 @@ api:
         - lambda: |-
             ESP_LOGI("room_cal", "Resetting all biquads to bypass");
 
-            bool success = tas5805m_biquad::reset_all_biquads(id(i2c_bus), 0x2C);
+            bool success = tas5805m_biquad::reset_all_biquads(id(i2c_bus), id(tas5805m_addr));
 
             if (success) {
                 ESP_LOGI("room_cal", "All biquads reset to bypass - flat response");
                 // Clear shadow state
-                id(current_profile_shadow) = tas5805m_profile::CalibrationProfile();
+                tas5805m_profile::current_profile_shadow() = tas5805m_profile::CalibrationProfile();
             } else {
                 ESP_LOGE("room_cal", "Failed to reset some biquads");
             }
@@ -466,9 +419,9 @@ api:
         - lambda: |-
             ESP_LOGI("room_cal", "Saving profile: %s", profile_name.c_str());
 
-            bool success = id(profile_manager).save_profile(
+            bool success = tas5805m_profile::profile_manager().save_profile(
                 profile_name,
-                id(current_profile_shadow)
+                tas5805m_profile::current_profile_shadow()
             );
 
             if (success) {
@@ -486,24 +439,25 @@ api:
             ESP_LOGI("room_cal", "Loading profile: %s", profile_name.c_str());
 
             tas5805m_profile::CalibrationProfile profile;
-            if (!id(profile_manager).load_profile(profile_name, profile)) {
+            if (!tas5805m_profile::profile_manager().load_profile(profile_name, profile)) {
                 ESP_LOGE("room_cal", "Failed to load profile '%s'", profile_name.c_str());
                 return;
             }
 
             // Apply all filters
             bool success = true;
+            uint8_t addr = id(tas5805m_addr);
             for (int i = 0; i < 15; i++) {
                 // Left channel
                 auto& lc = profile.left_channel[i];
-                if (!tas5805m_biquad::write_biquad(id(i2c_bus), 0x2C, 0, i,
+                if (!tas5805m_biquad::write_biquad(id(i2c_bus), addr, 0, i,
                                                    lc.b0, lc.b1, lc.b2, lc.a1, lc.a2)) {
                     success = false;
                 }
 
                 // Right channel
                 auto& rc = profile.right_channel[i];
-                if (!tas5805m_biquad::write_biquad(id(i2c_bus), 0x2C, 1, i,
+                if (!tas5805m_biquad::write_biquad(id(i2c_bus), addr, 1, i,
                                                    rc.b0, rc.b1, rc.b2, rc.a1, rc.a2)) {
                     success = false;
                 }
@@ -514,7 +468,7 @@ api:
             if (success) {
                 ESP_LOGI("room_cal", "Profile '%s' loaded and applied", profile_name.c_str());
                 // Update shadow state
-                id(current_profile_shadow) = profile;
+                tas5805m_profile::current_profile_shadow() = profile;
             } else {
                 ESP_LOGE("room_cal", "Errors occurred while applying profile '%s'", profile_name.c_str());
             }
@@ -527,7 +481,7 @@ api:
         - lambda: |-
             ESP_LOGI("room_cal", "Deleting profile: %s", profile_name.c_str());
 
-            bool success = id(profile_manager).delete_profile(profile_name);
+            bool success = tas5805m_profile::profile_manager().delete_profile(profile_name);
 
             if (success) {
                 ESP_LOGI("room_cal", "Profile '%s' deleted", profile_name.c_str());
@@ -543,7 +497,7 @@ api:
         - lambda: |-
             ESP_LOGI("room_cal", "Setting active profile: %s", profile_name.c_str());
 
-            bool success = id(profile_manager).set_active_profile(profile_name);
+            bool success = tas5805m_profile::profile_manager().set_active_profile(profile_name);
 
             if (success) {
                 ESP_LOGI("room_cal", "Active profile set to '%s'", profile_name.c_str());
@@ -557,7 +511,7 @@ api:
         - lambda: |-
             ESP_LOGI("room_cal", "Clearing active profile");
 
-            bool success = id(profile_manager).set_active_profile(-1);
+            bool success = tas5805m_profile::profile_manager().set_active_profile(-1);
 
             if (success) {
                 ESP_LOGI("room_cal", "Active profile cleared");
@@ -604,13 +558,31 @@ script:
           id(calibration_active) = false;
           ESP_LOGI("room_cal", "Test sweep complete");
 
-  # Apply a stored calibration profile
+  # Apply the active calibration profile (if one is set)
   - id: apply_stored_calibration
     mode: single
     then:
       - lambda: |-
-          // TODO: Load from NVS and apply
           ESP_LOGI("room_cal", "Applying stored calibration profile");
+
+          // Load and apply the active profile using profile manager
+          bool success = tas5805m_profile::profile_manager().load_and_apply_active_profile(
+              id(i2c_bus), id(tas5805m_addr)
+          );
+
+          if (success) {
+              // Also update shadow state from the active profile
+              std::string active_name = tas5805m_profile::profile_manager().get_active_profile_name();
+              if (active_name != "none" && active_name != "error") {
+                  tas5805m_profile::CalibrationProfile profile;
+                  if (tas5805m_profile::profile_manager().load_profile(active_name, profile)) {
+                      tas5805m_profile::current_profile_shadow() = profile;
+                      ESP_LOGI("room_cal", "Shadow state synced with active profile '%s'", active_name.c_str());
+                  }
+              }
+          } else {
+              ESP_LOGW("room_cal", "No active profile to apply or load failed");
+          }
 
 # =============================================================================
 # STATUS SENSORS
@@ -628,14 +600,14 @@ text_sensor:
     id: active_cal_profile
     update_interval: 10s
     lambda: |-
-      return id(profile_manager).get_active_profile_name();
+      return tas5805m_profile::profile_manager().get_active_profile_name();
 
   - platform: template
     name: "Available Profiles"
     id: available_profiles
     update_interval: 30s
     lambda: |-
-      auto profiles = id(profile_manager).list_profiles();
+      auto profiles = tas5805m_profile::profile_manager().list_profiles();
       if (profiles.empty()) {
         return std::string("none");
       }
