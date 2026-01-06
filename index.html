@@ -516,31 +516,25 @@
         for (const peak of peaksToCorrect) {
             // Calculate Q based on peak width (estimate)
             const q = estimateQ(response.frequencies, smoothed, peak.index);
-            
+
             // Limit correction to -12dB max
             const gain = Math.max(-12, -peak.deviation);
-            
-            const coeffs = calculateParametricEQ(peak.frequency, gain, q, sampleRate);
-            
+
             filters.push({
                 type: 'parametric',
                 frequency: Math.round(peak.frequency),
                 gain: Math.round(gain * 10) / 10,
                 q: Math.round(q * 100) / 100,
-                coefficients: coeffs,
             });
         }
-        
+
         // Add subsonic high-pass at 25Hz for speaker protection
-        const hpCoeffs = calculateHighPass(25, 0.707, sampleRate);
         filters.unshift({
             type: 'highpass',
             frequency: 25,
-            gain: 0,
             q: 0.707,
-            coefficients: hpCoeffs,
         });
-        
+
         return filters;
     }
     
@@ -598,82 +592,12 @@
     }
     
     // =============================================================================
-    // BIQUAD COEFFICIENT CALCULATION
-    // =============================================================================
-    
-    function calculateParametricEQ(fc, gainDb, q, fs) {
-        const A = Math.pow(10, gainDb / 40);
-        const omega = 2 * Math.PI * fc / fs;
-        const sinOmega = Math.sin(omega);
-        const cosOmega = Math.cos(omega);
-        const alpha = sinOmega / (2 * q);
-        
-        let b0 = 1 + alpha * A;
-        let b1 = -2 * cosOmega;
-        let b2 = 1 - alpha * A;
-        let a0 = 1 + alpha / A;
-        let a1 = -2 * cosOmega;
-        let a2 = 1 - alpha / A;
-        
-        // Normalize
-        b0 /= a0;
-        b1 /= a0;
-        b2 /= a0;
-        a1 /= a0;
-        a2 /= a0;
-        
-        return { b0, b1, b2, a1, a2 };
-    }
-    
-    function calculateHighPass(fc, q, fs) {
-        const omega = 2 * Math.PI * fc / fs;
-        const sinOmega = Math.sin(omega);
-        const cosOmega = Math.cos(omega);
-        const alpha = sinOmega / (2 * q);
-        
-        let b0 = (1 + cosOmega) / 2;
-        let b1 = -(1 + cosOmega);
-        let b2 = (1 + cosOmega) / 2;
-        let a0 = 1 + alpha;
-        let a1 = -2 * cosOmega;
-        let a2 = 1 - alpha;
-        
-        b0 /= a0;
-        b1 /= a0;
-        b2 /= a0;
-        a1 /= a0;
-        a2 /= a0;
-        
-        return { b0, b1, b2, a1, a2 };
-    }
-    
-    function calculateLowShelf(fc, gainDb, slope, fs) {
-        const A = Math.pow(10, gainDb / 40);
-        const omega = 2 * Math.PI * fc / fs;
-        const sinOmega = Math.sin(omega);
-        const cosOmega = Math.cos(omega);
-        const alpha = sinOmega / 2 * Math.sqrt((A + 1/A) * (1/slope - 1) + 2);
-        const twoSqrtAAlpha = 2 * Math.sqrt(A) * alpha;
-        
-        let b0 = A * ((A + 1) - (A - 1) * cosOmega + twoSqrtAAlpha);
-        let b1 = 2 * A * ((A - 1) - (A + 1) * cosOmega);
-        let b2 = A * ((A + 1) - (A - 1) * cosOmega - twoSqrtAAlpha);
-        let a0 = (A + 1) + (A - 1) * cosOmega + twoSqrtAAlpha;
-        let a1 = -2 * ((A - 1) + (A + 1) * cosOmega);
-        let a2 = (A + 1) + (A - 1) * cosOmega - twoSqrtAAlpha;
-        
-        b0 /= a0;
-        b1 /= a0;
-        b2 /= a0;
-        a1 /= a0;
-        a2 /= a0;
-        
-        return { b0, b1, b2, a1, a2 };
-    }
-    
-    // =============================================================================
     // UI HANDLERS
     // =============================================================================
+    // Note: Biquad coefficient calculation is done on the ESP32.
+    // We just send filter parameters (frequency, gain, Q) and the ESP32
+    // calculates and applies the coefficients. This avoids duplicating
+    // the coefficient math in JavaScript.
     
     document.getElementById('btn-connect').addEventListener('click', async () => {
         const statusEl = document.getElementById('connect-status');
@@ -762,39 +686,54 @@
     document.getElementById('btn-apply').addEventListener('click', async () => {
         const btn = document.getElementById('btn-apply');
         const statusEl = document.getElementById('apply-status');
-        
+
         btn.disabled = true;
         statusEl.style.display = 'block';
         statusEl.className = 'status info';
         statusEl.textContent = 'Applying filters to TAS5805M...';
-        
+
         try {
             // Apply each filter via HA service
+            // ESP32 calculates biquad coefficients from filter parameters
             for (let i = 0; i < state.calculatedFilters.length; i++) {
                 const filter = state.calculatedFilters[i];
-                const c = filter.coefficients;
-                
-                await callHaService('esphome', `${state.deviceName}_set_biquad`, {
-                    channel: 2,  // Both channels
-                    index: i,
-                    b0: c.b0,
-                    b1: c.b1,
-                    b2: c.b2,
-                    a1: c.a1,
-                    a2: c.a2,
-                });
-                
+
+                if (filter.type === 'highpass') {
+                    await callHaService('esphome', `${state.deviceName}_set_highpass`, {
+                        channel: 2,  // Both channels
+                        index: i,
+                        frequency: filter.frequency,
+                        q: filter.q,
+                    });
+                } else if (filter.type === 'lowpass') {
+                    await callHaService('esphome', `${state.deviceName}_set_lowpass`, {
+                        channel: 2,
+                        index: i,
+                        frequency: filter.frequency,
+                        q: filter.q,
+                    });
+                } else {
+                    // Default to parametric EQ
+                    await callHaService('esphome', `${state.deviceName}_set_parametric_eq`, {
+                        channel: 2,
+                        index: i,
+                        frequency: filter.frequency,
+                        gain_db: filter.gain,
+                        q: filter.q,
+                    });
+                }
+
                 statusEl.textContent = `Applied filter ${i + 1}/${state.calculatedFilters.length}`;
                 await new Promise(r => setTimeout(r, 100));  // Small delay between writes
             }
-            
+
             statusEl.className = 'status success';
             statusEl.textContent = 'All filters applied successfully!';
         } catch (e) {
             statusEl.className = 'status error';
             statusEl.textContent = `Error: ${e.message}`;
         }
-        
+
         btn.disabled = false;
     });
     
