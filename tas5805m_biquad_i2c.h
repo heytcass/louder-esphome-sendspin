@@ -419,6 +419,184 @@ inline bool reset_all_biquads(esphome::i2c::I2CBus* bus, uint8_t address) {
 }
 
 // =============================================================================
+// BATCHED BIQUAD PROGRAMMING (OPTIMIZED)
+// =============================================================================
+
+/**
+ * Biquad coefficient set for batched operations
+ */
+struct BiquadCoeffs {
+    float b0, b1, b2, a1, a2;
+
+    BiquadCoeffs() : b0(1.0f), b1(0.0f), b2(0.0f), a1(0.0f), a2(0.0f) {}
+    BiquadCoeffs(float _b0, float _b1, float _b2, float _a1, float _a2)
+        : b0(_b0), b1(_b1), b2(_b2), a1(_a1), a2(_a2) {}
+};
+
+/**
+ * Write multiple biquads to a single page efficiently
+ *
+ * This avoids repeated page selection when biquads share the same page.
+ * Page layout: biquads 0-3 on first page, 4-7 on second, etc.
+ *
+ * @param dev TAS5805M_I2C device (must already be initialized)
+ * @param page Page address to write to
+ * @param biquads Array of 4 biquad coefficient sets (or fewer for last page)
+ * @param count Number of biquads to write (1-4)
+ * @param start_offset Starting biquad offset on this page (0-3)
+ * @return true on success
+ */
+inline bool write_biquads_page(TAS5805M_I2C& dev, uint8_t page,
+                                const BiquadCoeffs* biquads, size_t count,
+                                size_t start_offset = 0) {
+    if (count == 0 || count > 4) return false;
+
+    // Select the page once
+    if (!dev.select_book_page(BOOK_COEFF, page)) {
+        ESP_LOGE("tas5805m_bq", "Failed to select page 0x%02X", page);
+        return false;
+    }
+
+    bool success = true;
+
+    // Write each biquad on this page
+    for (size_t i = 0; i < count; i++) {
+        uint8_t offset = OFFSET_BQ[start_offset + i];
+
+        // Convert to 9.23 fixed-point with sign inversion for a1/a2
+        int32_t b0_fp = float_to_9_23(biquads[i].b0);
+        int32_t b1_fp = float_to_9_23(biquads[i].b1);
+        int32_t b2_fp = float_to_9_23(biquads[i].b2);
+        int32_t a1_fp = float_to_9_23(-biquads[i].a1);
+        int32_t a2_fp = float_to_9_23(-biquads[i].a2);
+
+        // Pack coefficients
+        uint8_t coeff_buf[20];
+        pack_be32(b0_fp, &coeff_buf[0]);
+        pack_be32(b1_fp, &coeff_buf[4]);
+        pack_be32(b2_fp, &coeff_buf[8]);
+        pack_be32(a1_fp, &coeff_buf[12]);
+        pack_be32(a2_fp, &coeff_buf[16]);
+
+        if (!dev.write_bytes(offset, coeff_buf, 20)) {
+            ESP_LOGE("tas5805m_bq", "Failed to write biquad at offset 0x%02X", offset);
+            success = false;
+        }
+
+        // Small delay between writes on same page (reduced from 5ms)
+        delay(1);
+    }
+
+    return success;
+}
+
+/**
+ * Write all 15 biquads for one channel efficiently using page batching
+ *
+ * Instead of 15 separate page selections, this does only 4:
+ *   - Page 0: biquads 0-3
+ *   - Page 1: biquads 4-7
+ *   - Page 2: biquads 8-11
+ *   - Page 3: biquads 12-14
+ *
+ * @param bus ESPHome I2C bus pointer
+ * @param address I2C address
+ * @param channel 0=left, 1=right
+ * @param coeffs Array of 15 biquad coefficient sets
+ * @return true on success
+ */
+inline bool write_channel_biquads_batched(esphome::i2c::I2CBus* bus, uint8_t address,
+                                           int channel, const BiquadCoeffs coeffs[15]) {
+    if (channel != 0 && channel != 1) {
+        ESP_LOGE("tas5805m_bq", "Batched write requires single channel (0 or 1)");
+        return false;
+    }
+
+    TAS5805M_I2C dev(bus, address);
+    const uint8_t* page_map = (channel == 0) ? PAGE_LEFT_BQ : PAGE_RIGHT_BQ;
+
+    ESP_LOGI("tas5805m_bq", "Batched write: channel %d", channel);
+
+    bool success = true;
+
+    // Page 0: biquads 0-3
+    if (!write_biquads_page(dev, page_map[0], &coeffs[0], 4, 0)) {
+        success = false;
+    }
+
+    // Page 1: biquads 4-7
+    if (!write_biquads_page(dev, page_map[4], &coeffs[4], 4, 0)) {
+        success = false;
+    }
+
+    // Page 2: biquads 8-11
+    if (!write_biquads_page(dev, page_map[8], &coeffs[8], 4, 0)) {
+        success = false;
+    }
+
+    // Page 3: biquads 12-14 (only 3 biquads)
+    if (!write_biquads_page(dev, page_map[12], &coeffs[12], 3, 0)) {
+        success = false;
+    }
+
+    // Return to normal operation
+    dev.return_to_normal();
+
+    return success;
+}
+
+/**
+ * Write all 30 biquads (both channels) efficiently
+ *
+ * Performance comparison:
+ *   - Non-batched: ~150+ I2C transactions, 150ms+ delays
+ *   - Batched: ~24 I2C transactions, ~30ms delays
+ *
+ * @param bus ESPHome I2C bus pointer
+ * @param address I2C address
+ * @param left_coeffs Array of 15 biquad coefficient sets for left channel
+ * @param right_coeffs Array of 15 biquad coefficient sets for right channel
+ * @return true on success
+ */
+inline bool write_all_biquads_batched(esphome::i2c::I2CBus* bus, uint8_t address,
+                                       const BiquadCoeffs left_coeffs[15],
+                                       const BiquadCoeffs right_coeffs[15]) {
+    ESP_LOGI("tas5805m_bq", "Batched write: all 30 biquads");
+
+    uint32_t start_time = millis();
+
+    bool success = true;
+
+    if (!write_channel_biquads_batched(bus, address, 0, left_coeffs)) {
+        ESP_LOGE("tas5805m_bq", "Failed to write left channel biquads");
+        success = false;
+    }
+
+    if (!write_channel_biquads_batched(bus, address, 1, right_coeffs)) {
+        ESP_LOGE("tas5805m_bq", "Failed to write right channel biquads");
+        success = false;
+    }
+
+    uint32_t elapsed = millis() - start_time;
+    ESP_LOGI("tas5805m_bq", "Batched write completed in %lu ms", elapsed);
+
+    return success;
+}
+
+/**
+ * Reset all biquads to bypass using batched writes
+ */
+inline bool reset_all_biquads_batched(esphome::i2c::I2CBus* bus, uint8_t address) {
+    ESP_LOGI("tas5805m_bq", "Batched reset: all 30 biquads to bypass");
+
+    // Create bypass coefficients for all 15 biquads
+    BiquadCoeffs bypass[15];
+    // Default constructor already sets bypass (b0=1, rest=0)
+
+    return write_all_biquads_batched(bus, address, bypass, bypass);
+}
+
+// =============================================================================
 // FILTER COEFFICIENT CALCULATORS
 // =============================================================================
 

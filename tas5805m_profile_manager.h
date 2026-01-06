@@ -345,6 +345,10 @@ public:
 
     /**
      * Load and apply the active profile on boot
+     *
+     * Uses batched I2C writes for performance:
+     *   - Old method: ~150+ I2C transactions, 150ms+ delays
+     *   - Batched: ~24 I2C transactions, ~30ms delays
      */
     bool load_and_apply_active_profile(esphome::i2c::I2CBus* bus, uint8_t address) {
         if (active_profile_index_ == -1) {
@@ -358,30 +362,24 @@ public:
             return false;
         }
 
-        ESP_LOGI(TAG, "Applying active profile '%s'", profile.name);
+        ESP_LOGI(TAG, "Applying active profile '%s' (batched)", profile.name);
 
-        // Apply all filters
-        bool success = true;
+        // Convert profile coefficients to biquad library format
+        tas5805m_biquad::BiquadCoeffs left_coeffs[15];
+        tas5805m_biquad::BiquadCoeffs right_coeffs[15];
+
         for (int i = 0; i < 15; i++) {
-            // Left channel
             auto& lc = profile.left_channel[i];
-            if (!tas5805m_biquad::write_biquad(bus, address, 0, i,
-                                               lc.b0, lc.b1, lc.b2, lc.a1, lc.a2)) {
-                ESP_LOGE(TAG, "Failed to write left biquad %d", i);
-                success = false;
-            }
+            left_coeffs[i] = tas5805m_biquad::BiquadCoeffs(lc.b0, lc.b1, lc.b2, lc.a1, lc.a2);
 
-            // Right channel
             auto& rc = profile.right_channel[i];
-            if (!tas5805m_biquad::write_biquad(bus, address, 1, i,
-                                               rc.b0, rc.b1, rc.b2, rc.a1, rc.a2)) {
-                ESP_LOGE(TAG, "Failed to write right biquad %d", i);
-                success = false;
-            }
-
-            // Small delay between writes
-            delay(2);
+            right_coeffs[i] = tas5805m_biquad::BiquadCoeffs(rc.b0, rc.b1, rc.b2, rc.a1, rc.a2);
         }
+
+        // Use batched write for performance
+        bool success = tas5805m_biquad::write_all_biquads_batched(
+            bus, address, left_coeffs, right_coeffs
+        );
 
         if (success) {
             ESP_LOGI(TAG, "Successfully applied profile '%s' (%d filters)",
