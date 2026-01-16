@@ -303,10 +303,10 @@ public:
     }
 
     /**
-     * Set active profile by index
+     * Set active profile by index (-1 to clear)
      */
     bool set_active_profile(int slot) {
-        if (slot >= MAX_PROFILES) {
+        if (slot < -1 || slot >= static_cast<int>(MAX_PROFILES)) {
             ESP_LOGE(TAG, "Invalid profile slot: %d", slot);
             return false;
         }
