@@ -30,6 +30,12 @@ constexpr uint8_t REG_BOOK_SELECT = 0x7F;
 // Biquad coefficient book
 constexpr uint8_t BOOK_COEFF = 0xAA;
 
+// I2C timing delays (milliseconds)
+constexpr uint32_t DELAY_I2C_RETRY_MS = 5;           // Wait between I2C retries
+constexpr uint32_t DELAY_PAGE_SELECT_MS = 2;         // Wait after page/book select
+constexpr uint32_t DELAY_COEFF_WRITE_MS = 5;         // Wait after coefficient write
+constexpr uint32_t DELAY_BATCH_PAGE_WRITE_MS = 1;    // Wait between page writes in batch
+
 // =============================================================================
 // VALIDATION HELPERS
 // =============================================================================
@@ -222,7 +228,7 @@ public:
                      attempt + 1, MAX_RETRIES, reg, value, (int)err);
 
             if (attempt < MAX_RETRIES - 1) {
-                delay(5);  // Wait 5ms before retry
+                delay(DELAY_I2C_RETRY_MS);
             }
         }
 
@@ -253,7 +259,7 @@ public:
                      attempt + 1, MAX_RETRIES, reg, (int)len, (int)err);
 
             if (attempt < MAX_RETRIES - 1) {
-                delay(5);  // Wait 5ms before retry
+                delay(DELAY_I2C_RETRY_MS);
             }
         }
 
@@ -268,15 +274,15 @@ public:
     bool select_book_page(uint8_t book, uint8_t page) {
         // First go to page 0 to access book register
         if (!write_byte(REG_PAGE_SELECT, 0x00)) return false;
-        delay(2);  // Wait for page select to take effect
+        delay(DELAY_PAGE_SELECT_MS);
 
         // Select book
         if (!write_byte(REG_BOOK_SELECT, book)) return false;
-        delay(2);  // Wait for book select to take effect
+        delay(DELAY_PAGE_SELECT_MS);
 
         // Select page within book
         if (!write_byte(REG_PAGE_SELECT, page)) return false;
-        delay(2);  // Wait for page select to take effect
+        delay(DELAY_PAGE_SELECT_MS);
 
         return true;
     }
@@ -360,7 +366,7 @@ inline bool write_biquad(esphome::i2c::I2CBus* bus, uint8_t address,
             ESP_LOGI("tas5805m_bq", "Left channel BQ%d written (page=0x%02X offset=0x%02X)",
                      index, page, offset);
         }
-        delay(5);  // Wait for TAS5805M to process coefficient write
+        delay(DELAY_COEFF_WRITE_MS);
     }
 
     // Write to right channel if requested
@@ -380,7 +386,7 @@ inline bool write_biquad(esphome::i2c::I2CBus* bus, uint8_t address,
             ESP_LOGI("tas5805m_bq", "Right channel BQ%d written (page=0x%02X offset=0x%02X)",
                      index, page, offset);
         }
-        delay(5);  // Wait for TAS5805M to process coefficient write
+        delay(DELAY_COEFF_WRITE_MS);
     }
 
     // Return to normal operation
@@ -431,6 +437,15 @@ struct BiquadCoeffs {
     BiquadCoeffs() : b0(1.0f), b1(0.0f), b2(0.0f), a1(0.0f), a2(0.0f) {}
     BiquadCoeffs(float _b0, float _b1, float _b2, float _a1, float _a2)
         : b0(_b0), b1(_b1), b2(_b2), a1(_a1), a2(_a2) {}
+
+    // Check if this is a bypass filter (passthrough)
+    bool is_bypass() const {
+        return (std::fabs(b0 - 1.0f) < 0.0001f &&
+                std::fabs(b1) < 0.0001f &&
+                std::fabs(b2) < 0.0001f &&
+                std::fabs(a1) < 0.0001f &&
+                std::fabs(a2) < 0.0001f);
+    }
 };
 
 /**
@@ -483,8 +498,7 @@ inline bool write_biquads_page(TAS5805M_I2C& dev, uint8_t page,
             success = false;
         }
 
-        // Small delay between writes on same page (reduced from 5ms)
-        delay(1);
+        delay(DELAY_BATCH_PAGE_WRITE_MS);
     }
 
     return success;

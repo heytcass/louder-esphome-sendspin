@@ -444,26 +444,20 @@ api:
                 return;
             }
 
-            // Apply all filters
-            bool success = true;
-            uint8_t addr = id(tas5805m_addr);
+            // Convert profile to BiquadCoeffs arrays for batched write
+            tas5805m_biquad::BiquadCoeffs left_coeffs[15];
+            tas5805m_biquad::BiquadCoeffs right_coeffs[15];
+
             for (int i = 0; i < 15; i++) {
-                // Left channel
-                auto& lc = profile.left_channel[i];
-                if (!tas5805m_biquad::write_biquad(id(i2c_bus), addr, 0, i,
-                                                   lc.b0, lc.b1, lc.b2, lc.a1, lc.a2)) {
-                    success = false;
-                }
-
-                // Right channel
-                auto& rc = profile.right_channel[i];
-                if (!tas5805m_biquad::write_biquad(id(i2c_bus), addr, 1, i,
-                                                   rc.b0, rc.b1, rc.b2, rc.a1, rc.a2)) {
-                    success = false;
-                }
-
-                delay(2);  // Small delay between writes
+                left_coeffs[i] = profile.left_channel[i].to_coeffs();
+                right_coeffs[i] = profile.right_channel[i].to_coeffs();
             }
+
+            // Use batched write for much faster profile loading (~30ms vs ~150ms+)
+            bool success = tas5805m_biquad::write_all_biquads_batched(
+                id(i2c_bus), id(tas5805m_addr),
+                left_coeffs, right_coeffs
+            );
 
             if (success) {
                 ESP_LOGI("room_cal", "Profile '%s' loaded and applied", profile_name.c_str());

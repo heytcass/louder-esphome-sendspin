@@ -45,6 +45,15 @@ struct BiquadCoefficients {
     BiquadCoefficients(float _b0, float _b1, float _b2, float _a1, float _a2)
         : b0(_b0), b1(_b1), b2(_b2), a1(_a1), a2(_a2) {}
 
+    // Conversion from BiquadCoeffs (used in I2C operations)
+    BiquadCoefficients(const tas5805m_biquad::BiquadCoeffs& c)
+        : b0(c.b0), b1(c.b1), b2(c.b2), a1(c.a1), a2(c.a2) {}
+
+    // Convert to BiquadCoeffs for I2C operations
+    tas5805m_biquad::BiquadCoeffs to_coeffs() const {
+        return tas5805m_biquad::BiquadCoeffs(b0, b1, b2, a1, a2);
+    }
+
     // Check if this is a bypass filter (passthrough)
     bool is_bypass() const {
         return (fabs(b0 - 1.0f) < 0.0001f &&
@@ -369,11 +378,8 @@ public:
         tas5805m_biquad::BiquadCoeffs right_coeffs[15];
 
         for (int i = 0; i < 15; i++) {
-            auto& lc = profile.left_channel[i];
-            left_coeffs[i] = tas5805m_biquad::BiquadCoeffs(lc.b0, lc.b1, lc.b2, lc.a1, lc.a2);
-
-            auto& rc = profile.right_channel[i];
-            right_coeffs[i] = tas5805m_biquad::BiquadCoeffs(rc.b0, rc.b1, rc.b2, rc.a1, rc.a2);
+            left_coeffs[i] = profile.left_channel[i].to_coeffs();
+            right_coeffs[i] = profile.right_channel[i].to_coeffs();
         }
 
         // Use batched write for performance

@@ -595,13 +595,31 @@
 
     elements.btnAB.addEventListener('click', async () => {
       abState = !abState;
+      elements.btnAB.disabled = true;
 
-      if (abState) {
-        await callService('set_room_correction_enabled', { enabled: true });
-        elements.btnAB.textContent = 'A/B: Correction ON';
-      } else {
-        await callService('set_room_correction_enabled', { enabled: false });
-        elements.btnAB.textContent = 'A/B: Correction OFF';
+      try {
+        if (abState) {
+          // Re-apply calculated filters
+          for (let i = 0; i < calculatedFilters.length; i++) {
+            const filter = calculatedFilters[i];
+            await callService('set_parametric_eq', {
+              channel: 2,
+              index: i,
+              frequency: filter.frequency,
+              gain_db: filter.gain,
+              q: filter.q
+            });
+          }
+          elements.btnAB.textContent = 'A/B: Correction ON';
+        } else {
+          // Bypass all filters
+          await callService('reset_all_biquads');
+          elements.btnAB.textContent = 'A/B: Correction OFF';
+        }
+      } catch (err) {
+        console.error('A/B toggle error:', err);
+      } finally {
+        elements.btnAB.disabled = false;
       }
     });
 
@@ -795,54 +813,113 @@
       return buffer;
     }
 
+    // AudioWorklet processor code (inline as Blob URL to avoid separate file)
+    const recorderWorkletCode = `
+      class RecorderProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.buffers = [];
+          this.isRecording = true;
+
+          this.port.onmessage = (e) => {
+            if (e.data.command === 'stop') {
+              this.isRecording = false;
+              // Send all recorded data back
+              const totalLength = this.buffers.reduce((sum, buf) => sum + buf.length, 0);
+              const combined = new Float32Array(totalLength);
+              let offset = 0;
+              for (const buf of this.buffers) {
+                combined.set(buf, offset);
+                offset += buf.length;
+              }
+              this.port.postMessage({ type: 'data', samples: combined });
+            }
+          };
+        }
+
+        process(inputs, outputs, parameters) {
+          if (!this.isRecording) return false;
+
+          const input = inputs[0];
+          if (input && input[0] && input[0].length > 0) {
+            // Copy input data (must copy since buffer is reused)
+            this.buffers.push(new Float32Array(input[0]));
+          }
+
+          return true;  // Keep processor alive
+        }
+      }
+
+      registerProcessor('recorder-processor', RecorderProcessor);
+    `;
+
+    let recorderWorkletRegistered = false;
+
+    async function ensureRecorderWorklet() {
+      if (recorderWorkletRegistered) return;
+
+      const blob = new Blob([recorderWorkletCode], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+
+      try {
+        await audioContext.audioWorklet.addModule(url);
+        recorderWorkletRegistered = true;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
     async function recordSweepResponse(sweepBuffer, progressCallback) {
+      const duration = sweepBuffer.duration;
+      const totalDuration = duration + 0.5;  // Extra 500ms for reverb tail
+
+      // Ensure worklet is registered
+      await ensureRecorderWorklet();
+
       return new Promise((resolve, reject) => {
-        const duration = sweepBuffer.duration;
-        const numSamples = Math.floor((duration + 0.5) * CONFIG.sampleRate);  // Extra 500ms for reverb tail
-        const recordedData = new Float32Array(numSamples);
-        let recordIndex = 0;
-        
-        // Create script processor for recording
-        const scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+        // Create AudioWorkletNode for recording
+        const recorderNode = new AudioWorkletNode(audioContext, 'recorder-processor');
         const source = audioContext.createMediaStreamSource(micStream);
-        source.connect(scriptNode);
-        scriptNode.connect(audioContext.destination);
-        
+        source.connect(recorderNode);
+        // Note: No need to connect to destination - worklet processes without output
+
+        // Handle data from worklet
+        recorderNode.port.onmessage = (e) => {
+          if (e.data.type === 'data') {
+            resolve(e.data.samples);
+          }
+        };
+
         // Play sweep
         const sweepSource = audioContext.createBufferSource();
         sweepSource.buffer = sweepBuffer;
         sweepSource.connect(audioContext.destination);
-        
+
         const startTime = audioContext.currentTime;
         sweepSource.start(startTime);
-        
-        scriptNode.onaudioprocess = (e) => {
-          const input = e.inputBuffer.getChannelData(0);
+
+        // Progress updates
+        const progressInterval = setInterval(() => {
           const elapsed = audioContext.currentTime - startTime;
-          
           if (progressCallback) {
-            progressCallback(Math.min(1, elapsed / (duration + 0.5)));
+            progressCallback(Math.min(1, elapsed / totalDuration));
           }
-          
-          // Copy input to recorded data
-          for (let i = 0; i < input.length && recordIndex < numSamples; i++) {
-            recordedData[recordIndex++] = input[i];
-          }
-          
-          // Check if done
-          if (elapsed >= duration + 0.5) {
-            scriptNode.disconnect();
-            source.disconnect();
-            resolve(recordedData);
-          }
-        };
-        
+        }, 100);
+
+        // Stop recording after duration + reverb tail
+        setTimeout(() => {
+          clearInterval(progressInterval);
+          if (progressCallback) progressCallback(1);
+          recorderNode.port.postMessage({ command: 'stop' });
+          source.disconnect();
+        }, totalDuration * 1000);
+
         // Timeout safety
         setTimeout(() => {
-          scriptNode.disconnect();
+          clearInterval(progressInterval);
           source.disconnect();
-          resolve(recordedData);
-        }, (duration + 1) * 1000);
+          reject(new Error('Recording timeout'));
+        }, (totalDuration + 2) * 1000);
       });
     }
 
@@ -1311,29 +1388,42 @@
     // UI HELPERS
     // ==========================================================================
     function displayFilters(filters) {
-      elements.filterList.innerHTML = '';
-      
+      // Clear existing children safely
+      while (elements.filterList.firstChild) {
+        elements.filterList.removeChild(elements.filterList.firstChild);
+      }
+
       if (filters.length === 0) {
-        elements.filterList.innerHTML = '<p class="instructions">No significant corrections needed!</p>';
+        const p = document.createElement('p');
+        p.className = 'instructions';
+        p.textContent = 'No significant corrections needed!';
+        elements.filterList.appendChild(p);
         return;
       }
-      
+
       for (const filter of filters) {
         const item = document.createElement('div');
         item.className = 'filter-item';
-        
-        const freqStr = filter.frequency >= 1000 
+
+        const freqStr = filter.frequency >= 1000
           ? `${(filter.frequency/1000).toFixed(1)}kHz`
           : `${filter.frequency}Hz`;
-        
+
         const gainClass = filter.gain < 0 ? 'cut' : 'boost';
         const gainStr = filter.gain > 0 ? `+${filter.gain}` : filter.gain;
-        
-        item.innerHTML = `
-          <span class="filter-freq">${freqStr}</span>
-          <span class="filter-gain ${gainClass}">${gainStr}dB (Q=${filter.q})</span>
-        `;
-        
+
+        // Create elements safely using textContent to prevent XSS
+        const freqSpan = document.createElement('span');
+        freqSpan.className = 'filter-freq';
+        freqSpan.textContent = freqStr;
+
+        const gainSpan = document.createElement('span');
+        gainSpan.className = `filter-gain ${gainClass}`;
+        gainSpan.textContent = `${gainStr}dB (Q=${filter.q})`;
+
+        item.appendChild(freqSpan);
+        item.appendChild(gainSpan);
+
         elements.filterList.appendChild(item);
       }
     }
